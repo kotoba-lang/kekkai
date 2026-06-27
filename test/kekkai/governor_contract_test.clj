@@ -1,0 +1,102 @@
+(ns kekkai.governor-contract-test
+  "The zero-trust contract as executable tests — kekkai's analog of robotaxi's
+  safety_contract_test. Invariant: the actor never installs a reachability edge
+  / admits a device / approves a route the TailnetGovernor would reject, never
+  auto-admits a machine, never actuates the data plane, and always records
+  observations."
+  (:require [clojure.test :refer [deftest is testing]]
+            [langgraph.graph :as g]
+            [kekkai.store :as store]
+            [kekkai.coordllm :as coordllm]
+            [kekkai.operation :as op]))
+
+(defn- fresh [] (let [s (store/seed-db)] [s (op/build s)]))
+(defn- ctx [phase] {:phase phase})
+
+(defn- run [actor tid req phase]
+  (g/run* actor {:request req :context (ctx phase)} {:thread-id tid}))
+
+(deftest ingest-always-records
+  (testing "observe path records a ground datom regardless of phase"
+    (let [[s actor] (fresh)
+          res (run actor "i" {:op :node/heartbeat :node "n-server"
+                              :value {:last-seen store/demo-now :endpoint "198.51.100.9:41641"}} 0)]
+      (is (= :record (get-in res [:state :disposition])))
+      (is (some #(= "198.51.100.9:41641" (:endpoint %)) (store/heartbeats-of s "n-server"))))))
+
+(deftest clean-device-requires-machine-approval
+  (testing "a clean device never auto-admits — it interrupts for a human admin"
+    (let [[s actor] (fresh)
+          r1 (run actor "a" {:op :node/admit :node "n-pending"} 3)]
+      (is (= :interrupted (:status r1)) "admission is high-stakes → always human")
+      (is (= "pending" (:status (store/node s "n-pending"))) "nothing flipped before sign-off")
+      (let [r2 (g/run* actor {:approval {:status :approved :by "admin-alice"}}
+                       {:thread-id "a" :resume? true})]
+        (is (= :commit (get-in r2 [:state :disposition])))
+        (is (= "authorized" (:status (store/node s "n-pending"))))
+        (is (= "admin-alice" (:approved-by (store/assessment-of s "n-pending"))))))))
+
+(deftest rogue-admission-is-held-and-unoverridable
+  (testing "n-rogue: claims a tag it doesn't own AND its node key is expired"
+    (let [[s actor] (fresh)
+          res (run actor "b" {:op :node/admit :node "n-rogue"} 3)
+          basis (-> (store/ledger s) last :basis)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:tag-not-owned} basis))
+      (is (some #{:expired-key} basis))
+      (is (= "pending" (:status (store/node s "n-rogue"))) "rogue never authorized"))))
+
+(deftest deny-by-default-edge-is-held
+  (testing "a proposed reachability edge with no backing ACL grant is rejected"
+    (let [[s _] (fresh)
+          ;; advisor proposes n-server → n-laptop, which no grant permits
+          bad-adv (reify coordllm/Advisor
+                    (-advise [_ _ _] {:recommendation :reachable :effect :netmap
+                                      :peers [{:peer "n-laptop" :ports [22]}]
+                                      :summary "x" :rationale "x" :cites [] :confidence 0.9}))
+          a2 (op/build s {:advisor bad-adv})
+          res (g/run* a2 {:request {:op :access/assess :node "n-server"} :context (ctx 3)}
+                      {:thread-id "dbd"})]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:deny-by-default} (-> (store/ledger s) last :basis))))))
+
+(deftest no-actuation-invariant
+  (testing "a proposal that tries to actuate the data plane is held"
+    (let [[s _] (fresh)
+          bad-adv (reify coordllm/Advisor
+                    (-advise [_ _ _] {:recommendation :admit :effect :wireguard-push
+                                      :summary "x" :rationale "x" :peers [] :cites [] :confidence 0.9}))
+          a2 (op/build s {:advisor bad-adv})
+          res (g/run* a2 {:request {:op :node/admit :node "n-pending"} :context (ctx 3)}
+                      {:thread-id "na"})]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:no-actuation} (-> (store/ledger s) last :basis))))))
+
+(deftest phase0-disables-assessments
+  (let [[s actor] (fresh)
+        res (run actor "p0" {:op :node/admit :node "n-pending"} 0)]
+    (is (= :hold (get-in res [:state :disposition])))
+    (is (= :phase-disabled (-> (store/ledger s) last :phase-reason)))))
+
+(deftest access-auto-commits-when-confident
+  (testing "phase 3: a clean deny-by-default netmap is not high-stakes → auto"
+    (let [[s actor] (fresh)
+          res (run actor "x" {:op :access/assess :node "n-laptop"} 3)]
+      (is (= :commit (get-in res [:state :disposition])))
+      (is (some #(= "n-server" (:peer %)) (:peers (store/assessment-of s "n-laptop")))
+          "n-laptop reaches n-server via the tag:laptop→tag:server grant"))))
+
+(deftest exit-route-requires-signoff
+  (testing "approving an exit node is high-stakes → always human"
+    (let [[_ actor] (fresh)
+          r1 (run actor "ex" {:op :route/approve :node "n-gw" :route "r-exit"} 3)]
+      (is (= :interrupted (:status r1))))))
+
+(deftest reject-signoff-holds
+  (testing "an admin rejection records a hold, not an admission"
+    (let [[s actor] (fresh)
+          _  (run actor "r" {:op :node/admit :node "n-pending"} 3)
+          r2 (g/run* actor {:approval {:status :rejected :by "admin-alice"}}
+                     {:thread-id "r" :resume? true})]
+      (is (= :hold (get-in r2 [:state :disposition])))
+      (is (= "pending" (:status (store/node s "n-pending")))))))
