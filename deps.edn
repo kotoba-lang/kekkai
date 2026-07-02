@@ -1,14 +1,15 @@
 {:paths ["src"]
- ;; langgraph-clj brings langchain-clj transitively (both zero-/single-dep,
+ ;; langgraph brings langchain transitively (both zero-/single-dep,
  ;; all .cljc → portable to JVM / SCI / ClojureScript / GraalVM). Same runtime
  ;; robotaxi-actor / vehicle-design-actor / itonami ride on; a tailnet control
  ;; plane is just another sealed-intelligence ⊣ independent-governor StateGraph.
- :deps {io.github.com-junkawasaki/langgraph-clj
-        {:local/root "../langgraph-clj"}}
+ :deps {io.github.kotoba-lang/langgraph
+        {:git/url "https://github.com/kotoba-lang/langgraph.git"
+         :sha "5b4e5e70837b849b14b6a5800894e3be202ad5fa"}}
  :aliases
- {;; offline workspace dev — pin transitive langchain-clj to local checkout
+ {;; offline workspace dev — pin transitive langchain to local checkout
   :dev {:override-deps
-        {io.github.com-junkawasaki/langchain-clj {:local/root "../langchain-clj"}}}
+        {io.github.kotoba-lang/langchain {:local/root "../langchain"}}}
   ;; clojure -M:dev:run  → drive a tailnet through one CoordinationActor
   :run {:main-opts ["-m" "kekkai.sim"]}
   :test {:extra-paths ["test"]
