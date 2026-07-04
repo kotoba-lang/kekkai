@@ -17,7 +17,9 @@
   shared token, no coordination-server-issued auth-key.
   Use `load-or-create-identity!` to bootstrap/persist the actor's node key."
   (:require [clojure.edn :as edn]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [ed25519.core :as ed25519]
+            [ipns.core :as ipns])
   (:import [java.security KeyPairGenerator Signature KeyFactory]
            [java.security.spec PKCS8EncodedKeySpec X509EncodedKeySpec]
            [java.io ByteArrayOutputStream]
@@ -80,19 +82,7 @@
 (defn- cbor-bytes ^bytes [v]
   (let [o (ByteArrayOutputStream.)] (cbor-val o v) (.toByteArray o)))
 
-;; ───────── Ed25519 + did:key ─────────
-
-(def ^:private b58 "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-
-(defn- base58btc [^bytes data]
-  (let [zeros (count (take-while zero? data))
-        sb (StringBuilder.) fifty8 (java.math.BigInteger/valueOf 58)]
-    (loop [n (java.math.BigInteger. 1 data)]
-      (when (pos? (.signum n))
-        (.append sb (.charAt b58 (.intValue (.mod n fifty8))))
-        (recur (.divide n fifty8))))
-    (dotimes [_ zeros] (.append sb \1))
-    (.toString (.reverse sb))))
+;; ───────── Ed25519 + did:key (delegated to kotoba-lang/ed25519, ADR-2607050100) ─────────
 
 (defn- raw-pub
   "Raw 32-byte Ed25519 public key (last 32 bytes of the X.509 SPKI encoding)."
@@ -100,10 +90,7 @@
   (let [enc (.getEncoded pub)] (java.util.Arrays/copyOfRange enc (- (alength enc) 32) (alength enc))))
 
 (defn- did-key [pub]
-  ;; multicodec ed25519-pub = 0xED 0x01, then raw key; base58btc; 'z' multibase.
-  (let [raw (raw-pub pub)
-        framed (byte-array (concat [(unchecked-byte 0xED) (unchecked-byte 0x01)] (seq raw)))]
-    (str "did:key:z" (base58btc framed))))
+  (ed25519/did-key-from-pub (raw-pub pub)))
 
 ;; ───────── key-derived IPNS graph name (per-actor graph = node key) ─────────
 ;; Each actor's graph IS its own key: the graph name is the libp2p-key IPNS
@@ -111,28 +98,16 @@
 ;; is the Ed25519 signature over a key-derived IPNS name, NOT a server"). So the
 ;; actor owns its graph by holding the key — self-mint is authorized by
 ;; construction, no owner hand-off. (Tailscale analog: a node's identity in the
-;; tailnet IS its node key, not a server-issued account.)
-
-(def ^:private b36 "0123456789abcdefghijklmnopqrstuvwxyz")
-
-(defn- base36 [^bytes data]
-  (let [sb (StringBuilder.) k (java.math.BigInteger/valueOf 36)]
-    (loop [n (java.math.BigInteger. 1 data)]
-      (when (pos? (.signum n))
-        (.append sb (.charAt b36 (.intValue (.mod n k))))
-        (recur (.divide n k))))
-    (.toString (.reverse sb))))
+;; tailnet IS its node key, not a server-issued account.) Derivation lives in
+;; kotoba-lang/ipns (ADR-2607050100); this used to be a private BigInteger
+;; reimplementation.
 
 (defn ipns-name
   "The actor's own graph: the base36 CIDv1 (libp2p-key, identity multihash)
   IPNS name of its Ed25519 pubkey — i.e. the 'k51…' name. DID-derived, so the
   actor IS the authority over this graph."
   [pub]
-  (let [raw (raw-pub pub)
-        pb  (byte-array (map unchecked-byte (concat [0x08 0x01 0x12 0x20] (seq raw)))) ; libp2p PublicKey proto
-        mh  (byte-array (map unchecked-byte (concat [0x00 (alength pb)] (seq pb))))    ; identity multihash
-        cid (byte-array (map unchecked-byte (concat [0x01 0x72] (seq mh))))]           ; CIDv1 libp2p-key
-    (str "k" (base36 cid))))
+  (ipns/pubkey->name (raw-pub pub)))
 
 (defn generate-identity
   "A fresh Ed25519 identity {:private-key :public-key :did :graph}. For owner/
