@@ -8,7 +8,7 @@
          :sha "5b4e5e70837b849b14b6a5800894e3be202ad5fa"}
         ;; canonical did:key + IPNS-name derivation (ADR-2607050100) — replaces
         ;; this repo's own copy-pasted base58btc/base36/did-key/ipns-name.
-        io.github.kotoba-lang/ed25519
+        io.github.kotoba-lang/org-ietf-ed25519
         {:sha "fdcefb9f1b83461fee54d04b63e374fa301ee847"}
         io.github.kotoba-lang/tech-ipfs-specs-ipns
         {:sha "f2563eb1cb010c96f6dec1dfbd468fac93367498"}}
