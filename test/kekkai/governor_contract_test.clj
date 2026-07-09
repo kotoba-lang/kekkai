@@ -61,6 +61,22 @@
       (is (= :hold (get-in res [:state :disposition])))
       (is (some #{:deny-by-default} (-> (store/ledger s) last :basis))))))
 
+(deftest deny-by-default-holds-a-proposal-exceeding-the-grants-ports
+  (testing "a proposed edge IS backed by a grant, but claims broader ports than the grant allows"
+    (let [[s _] (fresh)
+          ;; grant tag:laptop→tag:server is scoped to ports [22 443] (store/seed-db) --
+          ;; the advisor claims wildcard port access on the same edge
+          bad-adv (reify coordllm/Advisor
+                    (-advise [_ _ _] {:recommendation :reachable :effect :netmap
+                                      :peers [{:peer "n-server" :ports ["*"]}]
+                                      :summary "x" :rationale "x" :cites [] :confidence 0.9}))
+          a2 (op/build s {:advisor bad-adv})
+          res (g/run* a2 {:request {:op :access/assess :node "n-laptop"} :context (ctx 3)}
+                      {:thread-id "port-scope"})]
+      (is (= :hold (get-in res [:state :disposition]))
+          "a grant existing at all is not enough -- the claimed ports must fit inside it")
+      (is (some #{:deny-by-default} (-> (store/ledger s) last :basis))))))
+
 (deftest no-actuation-invariant
   (testing "a proposal that tries to actuate the data plane is held"
     (let [[s _] (fresh)

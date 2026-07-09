@@ -70,20 +70,38 @@
       :detail (str "actor はデータ面(WireGuard)を作動させない(coordinate→netmap)。effect="
                    (:effect proposal))}]))
 
+(defn- ports-within-grant?
+  "True iff every port the proposal claims for a peer is actually covered by
+  the matching grant's `granted` ports. `[\"*\"]` in the GRANT is the only
+  legitimate wildcard (matches anything); a wildcard/absent :ports on the
+  PROPOSAL is never trusted on its own -- it must still be checked against
+  what the grant actually allows."
+  [granted proposed]
+  (or (= ["*"] (vec granted))
+      (every? (set granted) proposed)))
+
 (defn- deny-by-default-violations [policy subject proposal st now]
   ;; every proposed peer edge must be backed by a grant AND the peer must be a
-  ;; live authorized node — zero-trust: no implicit allow.
+  ;; live authorized node — zero-trust: no implicit allow. A grant existing at
+  ;; all is not enough: the proposal's claimed :ports must also fit inside the
+  ;; grant's actual allowed ports, or a proposal can silently over-claim
+  ;; access (e.g. claiming ["*"] against a grant scoped to [22 443]) and still
+  ;; pass as "backed by a grant."
   (->> (:peers proposal)
-       (keep (fn [{:keys [peer]}]
-               (let [pn (store/node st peer)]
+       (keep (fn [{:keys [peer ports]}]
+               (let [pn (store/node st peer)
+                     granted (acl/edge-allowed? policy subject pn)]
                  (cond
                    (seq (key-violations pn now peer))
                    {:rule :peer-key-invalid :detail (str "到達先ノード鍵が無効: " peer)}
                    (not= "authorized" (:status pn))
                    {:rule :peer-unauthorized :detail (str "到達先が未認可: " peer)}
-                   (nil? (acl/edge-allowed? policy subject pn))
+                   (nil? granted)
                    {:rule :deny-by-default
-                    :detail (str "ACL grant のない到達edgeを提案: → " peer)}))))
+                    :detail (str "ACL grant のない到達edgeを提案: → " peer)}
+                   (not (ports-within-grant? granted (or ports [])))
+                   {:rule :deny-by-default
+                    :detail (str "grant の許可範囲(" granted ")を超えるportを提案: → " peer " " ports)}))))
        vec))
 
 (defn- hijack-violations [st node-id route]
