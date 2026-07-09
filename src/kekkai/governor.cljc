@@ -75,10 +75,18 @@
   the matching grant's `granted` ports. `[\"*\"]` in the GRANT is the only
   legitimate wildcard (matches anything); a wildcard/absent :ports on the
   PROPOSAL is never trusted on its own -- it must still be checked against
-  what the grant actually allows."
+  what the grant actually allows.
+
+  An omitted/empty `proposed` is NOT auto-accepted: (every? pred []) is
+  vacuously true, which would silently trust an under-specified proposal
+  (no :ports claimed at all) unless the grant itself is a full [\"*\"]
+  wildcard -- matching this function's own documented intent rather than
+  defaulting open on missing information."
   [granted proposed]
-  (or (= ["*"] (vec granted))
-      (every? (set granted) proposed)))
+  (cond
+    (= ["*"] (vec granted)) true
+    (empty? proposed)       false
+    :else                   (every? (set granted) proposed)))
 
 (defn- deny-by-default-violations [policy subject proposal st now]
   ;; every proposed peer edge must be backed by a grant AND the peer must be a
