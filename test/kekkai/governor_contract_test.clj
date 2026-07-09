@@ -8,6 +8,7 @@
             [langgraph.graph :as g]
             [kekkai.store :as store]
             [kekkai.coordllm :as coordllm]
+            [kekkai.governor :as gov]
             [kekkai.operation :as op]))
 
 (defn- fresh [] (let [s (store/seed-db)] [s (op/build s)]))
@@ -100,3 +101,18 @@
                      {:thread-id "r" :resume? true})]
       (is (= :hold (get-in r2 [:state :disposition])))
       (is (= "pending" (:status (store/node s "n-pending")))))))
+
+(deftest governor-check-fails-closed-on-an-unrecognized-op
+  (testing "gov/check itself (not just the wrapping phase/gate) must reject an
+            unrecognized/typo'd/not-yet-wired :op as a hard violation -- a
+            confident, otherwise-clean proposal for a bogus op must never come
+            back :ok? true, since gov/check is documented as the independent
+            censor that decides commit/hold and any future direct caller
+            (a new UI surface, a refactor, code outside operation.cljc) must
+            not be able to slip an unhandled op past every zero-trust check"
+    (let [[s _] (fresh)
+          verdict (gov/check {:op :node/bogus :node "n-server"}
+                              {:effect :netmap :confidence 0.99} s)]
+      (is (false? (:ok? verdict)))
+      (is (true? (:hard? verdict)))
+      (is (some #{:unrecognized-op} (mapv :rule (:violations verdict)))))))

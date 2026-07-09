@@ -121,7 +121,11 @@
                (into [] (concat (key-violations subj now (:node request))
                                 (hijack-violations st (:node request) route)
                                 (actuation-violations proposal)))
-               [])
+               ;; an unrecognized :op is itself a hard violation (fail-closed:
+               ;; a not-yet-wired op must never silently pass as clean) --
+               ;; same invariant denrei/koyomi/tayori's governors already
+               ;; enforce for their own ops.
+               [{:rule :unrecognized-op :detail (str "未対応 op: " (:op request))}])
         conf    (:confidence proposal 0.0)
         low?    (< conf confidence-floor)
         stakes? (or (= :node/admit (:op request))
