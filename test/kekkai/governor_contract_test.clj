@@ -77,6 +77,24 @@
           "a grant existing at all is not enough -- the claimed ports must fit inside it")
       (is (some #{:deny-by-default} (-> (store/ledger s) last :basis))))))
 
+(deftest deny-by-default-holds-a-proposal-omitting-ports-entirely
+  (testing "a peer entry with no :ports claim at all must not vacuously pass the scope check"
+    (let [[s _] (fresh)
+          ;; (every? pred []) is vacuously true -- an omitted :ports must NOT
+          ;; be silently trusted as "within grant" unless the grant itself is
+          ;; a full ["*"] wildcard (it isn't, here: tag:laptop→tag:server is
+          ;; scoped to [22 443])
+          bad-adv (reify coordllm/Advisor
+                    (-advise [_ _ _] {:recommendation :reachable :effect :netmap
+                                      :peers [{:peer "n-server"}]
+                                      :summary "x" :rationale "x" :cites [] :confidence 0.9}))
+          a2 (op/build s {:advisor bad-adv})
+          res (g/run* a2 {:request {:op :access/assess :node "n-laptop"} :context (ctx 3)}
+                      {:thread-id "port-scope-empty"})]
+      (is (= :hold (get-in res [:state :disposition]))
+          "an under-specified proposal must not be treated as automatically within scope")
+      (is (some #{:deny-by-default} (-> (store/ledger s) last :basis))))))
+
 (deftest no-actuation-invariant
   (testing "a proposal that tries to actuate the data plane is held"
     (let [[s _] (fresh)
