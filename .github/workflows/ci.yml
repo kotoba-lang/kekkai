@@ -1,10 +1,9 @@
 name: ci
 
-# Deps reference sibling repos via :local/root (../langgraph-clj,
-# ../langchain-clj); those are PUBLIC, so the test job reconstructs the west
-# layout via checkout. Until the standalone repo's Actions are enabled, the
-# gates run locally / in the west superproject: `clojure -M:lint` and
-# `clojure -M:dev:test`.
+# Deps reference the langchain sibling repo via :local/root (../langchain);
+# it's PUBLIC, so the test job reconstructs the west layout via checkout.
+# Until the standalone repo's Actions are enabled, the gates run locally /
+# in the west superproject: `clojure -M:lint` and `clojure -M:dev:test`.
 
 on:
   push:
@@ -27,15 +26,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { path: orgs/com-junkawasaki/kekkai-actor }
+        with: { path: orgs/kotoba-lang/kekkai }
       - uses: actions/checkout@v4
-        with: { repository: com-junkawasaki/langgraph-clj, path: orgs/com-junkawasaki/langgraph-clj }
-      - uses: actions/checkout@v4
-        with: { repository: com-junkawasaki/langchain-clj, path: orgs/com-junkawasaki/langchain-clj }
+        with: { repository: kotoba-lang/langchain, path: orgs/kotoba-lang/langchain }
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "21" }
       - uses: DeLaGuardo/setup-clojure@13.0
         with: { cli: latest }
       - name: test (zero-trust contract · store parity · CACAO crypto)
-        working-directory: orgs/com-junkawasaki/kekkai-actor
+        working-directory: orgs/kotoba-lang/kekkai
         run: clojure -M:dev:test
