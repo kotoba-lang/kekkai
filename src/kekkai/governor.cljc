@@ -50,11 +50,27 @@
       3. No-actuation      — effect must be :treasury-release (a record for a
                             separate settlement step to read and execute);
                             this governor never moves funds itself.
+    :witness/dispute (ADR-2607110300 Phase 4 -- a contested slashing
+                      verdict; there is no automated dispute-resolution
+                      algorithm anywhere in this system, deliberately: per
+                      the ADR's own alternatives-considered section,
+                      designing dispute economics against a hypothetical
+                      counterparty is not verifiable today. This op
+                      therefore has exactly one behavior: record the
+                      dispute and ALWAYS escalate, unconditionally — never
+                      auto-resolves, regardless of confidence or how clean
+                      the proposal looks)
+      1. Valid node key   — the disputing actor must itself be a live,
+                            non-revoked, non-expired node.
+      2. No-actuation      — effect must be :dispute-record (a record for
+                            a human to read and decide); this governor
+                            never resolves a dispute itself.
   SOFT:
     4. Confidence floor → escalate.
-    5. Node admission, exit-route approval, AND treasury release are all
-       high-stakes → ALWAYS human, even with a clean witness verdict (real
-       money, not just network reachability)."
+    5. Node admission, exit-route approval, treasury release, AND witness
+       disputes are all high-stakes → ALWAYS human. Disputes go further
+       than the other three: confidence is irrelevant, there is no path
+       to :ok? at all for this op."
   (:require [clojure.string :as str]
             [kekkai.acl :as acl]
             [kekkai.store :as store]))
@@ -164,6 +180,19 @@
       :detail (str "actor は treasury 残高を直接動かさない(govern は hold|commit のみ)。effect="
                    (:effect proposal))}]))
 
+(defn- dispute-actuation-violations
+  "Same no-actuation philosophy as actuation-violations/
+  treasury-actuation-violations, scoped to disputes: an approved proposal
+  must resolve to a :dispute-record for a human to read and decide, never
+  a resolution this governor computes itself. There is deliberately no
+  'dispute-resolved-in-favor-of-X' verdict shape anywhere in this
+  namespace (ADR-2607110300 Phase 4)."
+  [proposal]
+  (when (not= :dispute-record (:effect proposal))
+    [{:rule :no-actuation
+      :detail (str "actor は異議申立ての記録のみを行い、判定は行わない(必ず human が最終判断)。effect="
+                   (:effect proposal))}]))
+
 (defn- hijack-violations [st node-id route]
   (when route
     (let [conflict (->> (store/all-routes st)
@@ -203,6 +232,9 @@
                (into [] (concat (key-violations subj now (:node request))
                                 (witness-verdict-violations proposal)
                                 (treasury-actuation-violations proposal)))
+               :witness/dispute
+               (into [] (concat (key-violations subj now (:node request))
+                                (dispute-actuation-violations proposal)))
                ;; an unrecognized :op is itself a hard violation (fail-closed:
                ;; a not-yet-wired op must never silently pass as clean) --
                ;; same invariant denrei/koyomi/tayori's governors already
@@ -212,6 +244,7 @@
         low?    (< conf confidence-floor)
         stakes? (or (= :node/admit (:op request))
                     (= :treasury/release (:op request))
+                    (= :witness/dispute (:op request))
                     (and (= :route/approve (:op request)) (= "exit" (:kind route))))
         hard?   (boolean (seq hard))]
     {:ok?          (and (not hard?) (not low?) (not stakes?))
@@ -222,7 +255,10 @@
      :high-stakes? stakes?}))
 
 (defn hold-fact [request verdict]
-  {:t (if (= :treasury/release (:op request)) :treasury-hold :tailnet-hold)
+  {:t (case (:op request)
+        :treasury/release :treasury-hold
+        :witness/dispute :witness-dispute-hold
+        :tailnet-hold)
    :op (:op request) :node (:node request)
    :disposition :hold :basis (mapv :rule (:violations verdict))
    :violations (:violations verdict) :confidence (:confidence verdict)})
