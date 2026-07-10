@@ -37,6 +37,34 @@
 
 (defn- subject [{:keys [node user]}] (or node user))
 
+(defn- commit-record
+  "Build the commit-time record for an assess op. Reuses the existing
+  :assessment store bucket/accessor for :treasury/release too (a :type
+  field in the value distinguishes it) rather than adding a new Store
+  protocol method + storage slot for one op -- same 'widen an existing
+  component's remit' philosophy ADR-2607110300 applies to the governor,
+  applied here to storage. `approval` is present only on the
+  human-signoff path (nil on the rare auto-commit path -- unreachable
+  for :treasury/release today since it's always high-stakes, but the
+  branch stays correct if that ever changes)."
+  [op subject-id proposal & [approval]]
+  (case op
+    :treasury/release
+    {:kind :assessment :id subject-id
+     :value (cond-> {:type :treasury-release
+                     :witness-verdict (:witness-verdict proposal)
+                     :amount (:amount proposal)
+                     :recipient (:recipient proposal)
+                     :status "released"}
+              approval (assoc :approved-by (:by approval))
+              (not approval) (assoc :by :auto))}
+    {:kind :assessment :id subject-id
+     :value (cond-> {:recommendation (:recommendation proposal)
+                     :summary (:summary proposal)
+                     :peers (:peers proposal) :route (:route proposal)}
+              approval (assoc :approved-by (:by approval))
+              (not approval) (assoc :by :auto))}))
+
 (defn- commit-effects!
   "Apply the op-specific control-plane write on commit. Admission flips the
   node to authorized (a membership record, NOT a data-plane push); route
@@ -82,8 +110,16 @@
       ;; ── assess path ──
       (g/add-node :advise
         (fn [{:keys [request]}]
-          (let [p (coordllm/-advise advisor store request)]
-            {:proposal p :audit [(coordllm/trace request p)]})))
+          ;; ADR-2607110300 Phase 3: a :treasury/release "proposal" is an
+          ;; objective fact the caller already assembled (a witness-quorum
+          ;; verdict + amount/recipient), not a judgment call -- running it
+          ;; through the coord-LLM would be a category error, so value-ops
+          ;; skip -advise; the caller seeds :proposal directly at graph
+          ;; invocation, and :advise only records that it arrived.
+          (if (contains? phase/value-ops (:op request))
+            {:audit [{:t :value-proposal-received :op (:op request) :node (subject request)}]}
+            (let [p (coordllm/-advise advisor store request)]
+              {:proposal p :audit [(coordllm/trace request p)]}))))
 
       (g/add-node :govern
         (fn [{:keys [request proposal]}]
@@ -108,21 +144,13 @@
                         :phase ph :confidence (:confidence verdict)}]}
               :commit
               {:disposition :commit
-               :record {:kind :assessment :id (subject request)
-                        :value {:recommendation (:recommendation proposal)
-                                :summary (:summary proposal)
-                                :peers (:peers proposal) :route (:route proposal)
-                                :by :auto}}}))))
+               :record (commit-record (:op request) (subject request) proposal)}))))
 
       (g/add-node :request-approval
         (fn [{:keys [request proposal approval verdict]}]
           (if (= :approved (:status approval))
             {:disposition :commit
-             :record {:kind :assessment :id (subject request)
-                      :value {:recommendation (:recommendation proposal)
-                              :summary (:summary proposal)
-                              :peers (:peers proposal) :route (:route proposal)
-                              :approved-by (:by approval)}}
+             :record (commit-record (:op request) (subject request) proposal approval)
              :audit [{:t :admin-signoff :op (:op request)
                       :node (subject request) :by (:by approval)
                       :recommendation (:recommendation proposal)}]}
@@ -137,14 +165,22 @@
         (fn [{:keys [request record]}]
           (store/record-datom! store record)
           (commit-effects! store request)
-          (let [f {:t :committed :op (:op request) :subject (subject request)
-                   :disposition :commit :basis (get-in record [:value :recommendation])}]
+          (let [basis (or (get-in record [:value :recommendation])
+                          (get-in record [:value :status]))
+                f {:t :committed :op (:op request) :subject (subject request)
+                   :disposition :commit :basis basis}]
             (store/append-ledger! store f)
             {:audit [f]})))
 
       (g/add-node :hold
         (fn [{:keys [audit]}]
-          (when-let [hf (last (filter #(#{:tailnet-hold :signoff-rejected} (:t %)) audit))]
+          ;; :treasury-hold/:witness-dispute-hold are governor/hold-fact's
+          ;; :t for :treasury/release and :witness/dispute (ADR-2607110300
+          ;; Phase 3/4) -- included alongside :tailnet-hold so a value-op's
+          ;; hold fact actually reaches the ledger instead of being
+          ;; silently dropped by this filter.
+          (when-let [hf (last (filter #(#{:tailnet-hold :treasury-hold :witness-dispute-hold
+                                          :signoff-rejected} (:t %)) audit))]
             (store/append-ledger! store (assoc hf :disposition :hold)))
           {}))
 
