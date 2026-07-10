@@ -32,9 +32,29 @@
       2. No-hijack         — the cidr is not already approved for a DIFFERENT
                             node (no silent route takeover).
       3. No-actuation.
+    :treasury/release (ADR-2607110300 Phase 3 -- widens this governor's remit
+                       from network reachability to value: same deny-by-
+                       default philosophy as acl.cljc's edge-allowed?, now
+                       gating fund release on a witness-quorum verdict
+                       instead of an ACL grant)
+      1. Valid node key   — same identity check as every other op; the
+                            requesting actor must be a live, non-revoked,
+                            non-expired node (an actor has its own did:key,
+                            per the CLAUDE.md Actor pattern).
+      2. Witness quorum    — deny-by-default for value: an absent or
+                            non-:witnessed witness-quorum verdict
+                            (kotoba.lang.witness-quorum's :kind, injected via
+                            the proposal, never vendored here) is a hard
+                            violation, exactly like an unbacked reachability
+                            edge is under :access/assess.
+      3. No-actuation      — effect must be :treasury-release (a record for a
+                            separate settlement step to read and execute);
+                            this governor never moves funds itself.
   SOFT:
     4. Confidence floor → escalate.
-    5. Node admission and exit-route approval are high-stakes → ALWAYS human."
+    5. Node admission, exit-route approval, AND treasury release are all
+       high-stakes → ALWAYS human, even with a clean witness verdict (real
+       money, not just network reachability)."
   (:require [clojure.string :as str]
             [kekkai.acl :as acl]
             [kekkai.store :as store]))
@@ -112,6 +132,38 @@
                     :detail (str "grant の許可範囲(" granted ")を超えるportを提案: → " peer " " ports)}))))
        vec))
 
+(defn- witness-verdict-violations
+  "Deny-by-default for value release (ADR-2607110300 Phase 3): mirrors
+  deny-by-default-violations' philosophy (no implicit allow) but the
+  'grant' is a witness-quorum verdict instead of an ACL edge. `proposal`
+  carries `:witness-verdict` — the caller's own witness-quorum result map
+  (`{:kind :witnessed|:rejected|:pending|:escalated ...}`, the same shape
+  kotoba.lang.witness-quorum.quorum/quorum-state returns and
+  cloud-murakumo.ledger.witness/witness-run threads through as `:state`).
+  This governor does not run quorum collection itself -- it only censors
+  the verdict a caller already collected, same as it never runs ACL
+  matching itself in isolation from acl.cljc."
+  [proposal]
+  (let [verdict (:witness-verdict proposal)]
+    (cond
+      (nil? verdict)
+      [{:rule :no-witness-verdict :detail "witness quorum の検証結果が提示されていない"}]
+      (not= :witnessed (:kind verdict))
+      [{:rule :witness-quorum-not-reached
+        :detail (str "witness quorum が到達していない: " (:kind verdict))}]
+      :else [])))
+
+(defn- treasury-actuation-violations
+  "Same no-actuation philosophy as actuation-violations, scoped to the
+  value-release effect: an approved proposal must resolve to a
+  :treasury-release record for a separate settlement step, never a direct
+  fund movement carried by this governor."
+  [proposal]
+  (when (not= :treasury-release (:effect proposal))
+    [{:rule :no-actuation
+      :detail (str "actor は treasury 残高を直接動かさない(govern は hold|commit のみ)。effect="
+                   (:effect proposal))}]))
+
 (defn- hijack-violations [st node-id route]
   (when route
     (let [conflict (->> (store/all-routes st)
@@ -147,6 +199,10 @@
                (into [] (concat (key-violations subj now (:node request))
                                 (hijack-violations st (:node request) route)
                                 (actuation-violations proposal)))
+               :treasury/release
+               (into [] (concat (key-violations subj now (:node request))
+                                (witness-verdict-violations proposal)
+                                (treasury-actuation-violations proposal)))
                ;; an unrecognized :op is itself a hard violation (fail-closed:
                ;; a not-yet-wired op must never silently pass as clean) --
                ;; same invariant denrei/koyomi/tayori's governors already
@@ -155,6 +211,7 @@
         conf    (:confidence proposal 0.0)
         low?    (< conf confidence-floor)
         stakes? (or (= :node/admit (:op request))
+                    (= :treasury/release (:op request))
                     (and (= :route/approve (:op request)) (= "exit" (:kind route))))
         hard?   (boolean (seq hard))]
     {:ok?          (and (not hard?) (not low?) (not stakes?))
@@ -165,6 +222,7 @@
      :high-stakes? stakes?}))
 
 (defn hold-fact [request verdict]
-  {:t :tailnet-hold :op (:op request) :node (:node request)
+  {:t (if (= :treasury/release (:op request)) :treasury-hold :tailnet-hold)
+   :op (:op request) :node (:node request)
    :disposition :hold :basis (mapv :rule (:violations verdict))
    :violations (:violations verdict) :confidence (:confidence verdict)})
