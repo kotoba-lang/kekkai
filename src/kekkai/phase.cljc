@@ -13,17 +13,35 @@
     3 supervised    — access/subnet auto-commit when clean+confident; node
                       admission and exit-node approval are high-stakes and
                       ALWAYS route to a human admin (machine approval is a human
-                      call, like Tailscale).")
+                      call, like Tailscale).
+
+  Value governance (:treasury/release, ADR-2607110300 Phase 3) is active at
+  every phase above, including 0 -- it never auto-commits regardless of
+  phase (always high-stakes, see governor.cljc), so there is no rollout
+  ladder for it to climb; gating it behind the NETWORK phase would just be
+  wrong (fund release has nothing to do with tailnet maturity).")
 
 (def record-ops #{:node/register :node/heartbeat :user/register
                   :acl/publish :route/advertise})
 (def assess-ops #{:node/admit :access/assess :route/approve})
 
+;; ADR-2607110300 Phase 3: value governance (fund release) is orthogonal to
+;; the tailnet rollout ladder below -- a system can govern fund release
+;; before it trusts automated NETWORK decisions, so :treasury/release is
+;; active in :assess at every phase, including 0. :witness/dispute (Phase 4)
+;; is deliberately NOT here: this governor has no automated
+;; dispute-resolution shape (see governor.cljc's
+;; dispute-actuation-violations docstring -- there is no
+;; "dispute-resolved-in-favor-of-X" verdict) to route through :decide/:commit,
+;; so it stays reachable via governor/check + hold-fact directly, not this
+;; StateGraph, until dispute-resolution semantics are actually designed.
+(def value-ops #{:treasury/release})
+
 (def phases
-  {0 {:label "observe-only" :assess #{}        :auto #{}}
-   1 {:label "assisted"     :assess assess-ops :auto #{}}
-   2 {:label "assisted-net" :assess assess-ops :auto #{:access/assess :route/approve}}
-   3 {:label "supervised"   :assess assess-ops :auto #{:access/assess :route/approve}}})
+  {0 {:label "observe-only" :assess value-ops                   :auto #{}}
+   1 {:label "assisted"     :assess (into assess-ops value-ops) :auto #{}}
+   2 {:label "assisted-net" :assess (into assess-ops value-ops) :auto #{:access/assess :route/approve}}
+   3 {:label "supervised"   :assess (into assess-ops value-ops) :auto #{:access/assess :route/approve}}})
 
 (def default-phase 3)
 
