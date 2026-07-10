@@ -121,6 +121,21 @@
       (is (some #(= "n-server" (:peer %)) (:peers (store/assessment-of s "n-laptop")))
           "n-laptop reaches n-server via the tag:laptop→tag:server grant"))))
 
+(deftest missing-phase-context-does-not-grant-max-autonomy
+  ;; default-phase is the fallback both when :phase is entirely absent
+  ;; from context (kekkai.operation) and when an unrecognized phase
+  ;; number is passed (phase/gate). It used to be 3 -- where
+  ;; :access/assess can auto-commit -- so a caller that simply forgot
+  ;; to set :phase silently got MAXIMUM autonomy instead of the safe
+  ;; "start narrow" default.
+  (testing "omitting :phase from context still requires human approval on a clean netmap assessment"
+    (let [[s actor] (fresh)
+          res (g/run* actor {:request {:op :access/assess :node "n-laptop"} :context {}}
+                      {:thread-id "mp"})]
+      (is (not= :commit (get-in res [:state :disposition]))
+          "a clean assessment must not auto-commit when :phase is unset")
+      (is (nil? (store/assessment-of s "n-laptop")) "SSoT untouched without explicit phase"))))
+
 (deftest exit-route-requires-signoff
   (testing "approving an exit node is high-stakes → always human"
     (let [[_ actor] (fresh)
