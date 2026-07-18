@@ -65,12 +65,42 @@
       2. No-actuation      — effect must be :dispute-record (a record for
                             a human to read and decide); this governor
                             never resolves a dispute itself.
+    :availability/slash (mirrors :treasury/release's shape exactly, but for
+                         the punitive side of value: gates a slashing
+                         action on a caller-supplied retrieval-availability
+                         verdict from kotoba-lang/kotobase-peer's
+                         availability.cljc `audit-outcome`
+                         — `{:kotobase.availability/node ...
+                            :kotobase.availability/cid ...
+                            :kotobase.availability/epoch ...
+                            :kotobase.availability/verdict ...}` —
+                         instead of a witness-quorum verdict. This governor
+                         does not run the retrieval audit itself, same
+                         'caller collects, governor only censors' split as
+                         witness-verdict-violations.)
+      1. Valid node key   — same identity check as every other op; the
+                            requesting actor must be a live, non-revoked,
+                            non-expired node.
+      2. Proof must have actually failed — deny-by-default for punitive
+                            action: an absent verdict, or a verdict whose
+                            `:kotobase.availability/verdict` is anything
+                            other than :failed/:missed (i.e. :ok,
+                            :malformed, or :verifier-lacks-replica — an
+                            inconclusive outcome), is a hard violation.
+                            Ambiguous evidence never authorizes a slash,
+                            exactly like an unbacked reachability edge is
+                            under :access/assess or a non-:witnessed
+                            verdict is under :treasury/release.
+      3. No-actuation      — effect must be :slash-record (a record for a
+                            separate settlement step to read and execute);
+                            this governor never adjusts balances or
+                            reputation itself.
   SOFT:
     4. Confidence floor → escalate.
-    5. Node admission, exit-route approval, treasury release, AND witness
-       disputes are all high-stakes → ALWAYS human. Disputes go further
-       than the other three: confidence is irrelevant, there is no path
-       to :ok? at all for this op."
+    5. Node admission, exit-route approval, treasury release, witness
+       disputes, AND availability slashing are all high-stakes → ALWAYS
+       human. Disputes go further than the others: confidence is
+       irrelevant, there is no path to :ok? at all for this op."
   (:require [clojure.string :as str]
             [kekkai.acl :as acl]
             [kekkai.store :as store]))
@@ -193,6 +223,43 @@
       :detail (str "actor は異議申立ての記録のみを行い、判定は行わない(必ず human が最終判断)。effect="
                    (:effect proposal))}]))
 
+(defn- retrieval-verdict-violations
+  "Deny-by-default for punitive action: mirrors witness-verdict-violations'
+  philosophy (no implicit allow) but the 'grant' is a retrieval-availability
+  proof instead of a witness-quorum verdict. `proposal` carries
+  `:retrieval-verdict` — the caller's own audit-outcome result map (same
+  shape kotoba-lang/kotobase-peer's availability.cljc `audit-outcome`
+  returns: `{:kotobase.availability/node ... :kotobase.availability/cid ...
+  :kotobase.availability/epoch ... :kotobase.availability/verdict v}`).
+  This governor does not run the retrieval audit itself -- it only censors
+  the verdict a caller already collected, same as it never runs witness
+  quorum collection in isolation from witness-verdict-violations. Only
+  :failed/:missed authorize a slash; :ok, :malformed and
+  :verifier-lacks-replica are inconclusive outcomes and must never
+  authorize a punitive action."
+  [proposal]
+  (let [verdict (:retrieval-verdict proposal)]
+    (cond
+      (nil? verdict)
+      [{:rule :no-retrieval-verdict :detail "retrieval-availability の検証結果が提示されていない"}]
+      (not (#{:failed :missed} (:kotobase.availability/verdict verdict)))
+      [{:rule :retrieval-proof-not-failed
+        :detail (str "retrieval-availability 証明が失敗/未達ではない(slash不可): "
+                     (:kotobase.availability/verdict verdict))}]
+      :else [])))
+
+(defn- slash-actuation-violations
+  "Same no-actuation philosophy as actuation-violations/
+  treasury-actuation-violations, scoped to slashing: an approved proposal
+  must resolve to a :slash-record for a separate settlement step to read
+  and execute, never a direct balance/reputation adjustment carried by
+  this governor."
+  [proposal]
+  (when (not= :slash-record (:effect proposal))
+    [{:rule :no-actuation
+      :detail (str "actor はノードの残高/reputationを直接動かさない(govern は record のみ)。effect="
+                   (:effect proposal))}]))
+
 (defn- hijack-violations [st node-id route]
   (when route
     (let [conflict (->> (store/all-routes st)
@@ -235,6 +302,10 @@
                :witness/dispute
                (into [] (concat (key-violations subj now (:node request))
                                 (dispute-actuation-violations proposal)))
+               :availability/slash
+               (into [] (concat (key-violations subj now (:node request))
+                                (retrieval-verdict-violations proposal)
+                                (slash-actuation-violations proposal)))
                ;; an unrecognized :op is itself a hard violation (fail-closed:
                ;; a not-yet-wired op must never silently pass as clean) --
                ;; same invariant denrei/koyomi/tayori's governors already
@@ -245,6 +316,7 @@
         stakes? (or (= :node/admit (:op request))
                     (= :treasury/release (:op request))
                     (= :witness/dispute (:op request))
+                    (= :availability/slash (:op request))
                     (and (= :route/approve (:op request)) (= "exit" (:kind route))))
         hard?   (boolean (seq hard))]
     {:ok?          (and (not hard?) (not low?) (not stakes?))
@@ -258,6 +330,7 @@
   {:t (case (:op request)
         :treasury/release :treasury-hold
         :witness/dispute :witness-dispute-hold
+        :availability/slash :availability-slash-hold
         :tailnet-hold)
    :op (:op request) :node (:node request)
    :disposition :hold :basis (mapv :rule (:violations verdict))
