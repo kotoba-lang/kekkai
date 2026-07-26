@@ -94,7 +94,7 @@ ledger → swaps to DatomicStore with identical results.
 | ACL policy (HuJSON, deny-by-default) | `kekkai.acl` over the published `:policy` datom |
 | netmap (peer map a node receives) | `:access/assess` → committed netmap assessment |
 | subnet routes / exit nodes | `:route/advertise` (observe) → `:route/approve` (exit = human) |
-| `tailscale up` actuating WireGuard | **out of scope by charter** — the node does this, not the actor |
+| `tailscale up` actuating WireGuard | **out of scope by charter** — the node does this, not the actor: [`kekkai-node`](https://github.com/kotoba-lang/kekkai-node) |
 | auth keys / SSO-issued tokens | **none** — the actor self-mints CACAO from its own key |
 
 ## 本番バックエンド（injection）
@@ -134,6 +134,14 @@ CACAO 自己発行はオフライン検証済み（did:key `z6Mk…`・graph `k5
 datomic origin が 522（Cloudflare upstream timeout）の間はサーバ側検証が走らない
 （ai-gftd-itonami ADR-0002 と同じ既知状況、owner 認可は不要）。
 
+データ面エージェントは実装された（2026-07-26、ADR-2607266500）:
+[`kotoba-lang/kekkai-node`](https://github.com/kotoba-lang/kekkai-node) が
+netmap を消費して peer 間の Noise IK session（[`kotoba-lang/noise`](https://github.com/kotoba-lang/noise)）
+を張り、NAT hole punching と relay（DERP 相当）で経路を作り、MagicDNS を出す。
+**charter は変わらない** — actor は依然パケットを運ばず、node 側があのコンポーネントで
+actuate する。受け渡し形式は `:netmap/{version,tailnet,self,peers,edges,relays}` の EDN。
+
 残り: kotobase.net origin 復帰時の live 結合 1 回・実 LLM（一般 API key）・
-AT-Protocol XRPC（lexicon）境界の配線・WireGuard データ面エージェント（charter
-外の別コンポーネント）との netmap 受け渡し。CI workflow は superproject 実行。
+AT-Protocol XRPC（lexicon）境界の配線・kekkai-node への netmap 発行を
+**署名付き**にすること（node 側の検証境界は `kekkai.node.signed-netmap` に
+あるが、この actor はまだ署名 envelope を発行していない）。CI workflow は superproject 実行。
