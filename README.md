@@ -55,6 +55,49 @@ its node key. Here the actor *is* its Ed25519 key — the key-derived IPNS name 
 its kotoba graph, so it **self-mints its own CACAO** (no coordination-server
 auth-key, no human-handed token). See ADR-0002.
 
+## 組織境界 — one control plane, many organizations
+
+**一つの制御面が複数の組織を収容する。組織の境界は ACL の規約ではなく構造で守る**
+（ADR-2608040100）。ACL selector は裸のトークン（`"alice"`, `"tag:server"`）なので、
+2つの組織がそれぞれ独立に `tag:server` と名付けたら、単一の flat policy では
+**互いの grant が一致してしまう**。これは誰かが書き忘れた rule ではなく policy 言語
+そのものの形なので、grant を足しても直らない。
+
+だから境界は grant の**外側**に置く。各ノードはちょうど1つの **tailnet**（= 1組織の
+オーバーレイ）に属し、tailnet ごとに独立した policy を持ち、`acl/edge-decision` は
+**grant を見る前に**組織境界を判定する。ACL が境界を越える grant を書くことはできない
+——境界は policy が所有しない field の上で先に判定されるから。
+
+```
+edge-decision(plane, src, dst)
+  ├ 同一 tailnet → その組織の policy の grant で判定  → :deny-by-default
+  └ 異なる tailnet
+      ├ 相互承認済み peering がある → その peering の :from 方向 grant で判定
+      │                                                  → :peering-grant-missing
+      └ 無い                                             → :cross-tailnet
+```
+
+- **`:tailnet` 未設定は wildcard ではない。** 特定の tailnet（`acl/default-tailnet`）
+  に解決される。tenant plane 以前のノードは全員そこに揃うので既存の到達性は
+  1ミリも変わらず、明示的に `"gftd"` に置かれたノードからは到達できない。
+  「未設定＝何にでも一致」がまさにこの機構が防ぐ失敗。
+- **越境には rule ではなく object が要る。** `peering` は両組織の tailnet を名指し、
+  自分の directional grant を持ち、**両方が承認して初めて**有効になる
+  （`acl/peering-active?`）。片方が単独で相手への経路を開くことはできず、越境 grant は
+  どちらの内部 policy にも埋もれない。承認は常に人間（`:peering/approve` は
+  high-stakes）。
+- **route hijack 判定は tailnet 単位。** `10.0.0.0/24` は globally unique な名前では
+  ないので、2組織が同じ prefix を広告するのは異常ではなく通常。global に走査すると
+  2組織目の普通の RFC1918 subnet を「乗っ取り」と報告し、しかも拒否理由で1組織目に
+  相手の内部アドレッシングを教えてしまう。
+
+| op | 何をするか |
+|---|---|
+| `:tailnet/register` | 組織の tailnet を登録（observe） |
+| `:acl/publish` | **その tailnet の** ACL を発行（`:tailnet` 省略時は default） |
+| `:peering/propose` | 越境 peering を提案（`:approved-by` は空で記録される——提案者が相手の同意を書けない） |
+| `:peering/approve` | **1組織分**の同意を追加。常に人間承認、両者揃って初めて有効 |
+
 ## Run
 
 ```bash
@@ -74,15 +117,16 @@ ledger → swaps to DatomicStore with identical results.
 | File | Role |
 |---|---|
 | `src/kekkai/store.cljc` | **Store** protocol — `MemStore` ‖ `DatomicStore` (`langchain.db`, swappable to Datomic Local / kotoba-server) + append-only **tailnet genealogy ledger** |
-| `src/kekkai/acl.cljc` | pure **deny-by-default ACL** evaluation (tag ownership · edge grants · reachable peers) — shared by governor & coord-LLM, no I/O |
+| `src/kekkai/acl.cljc` | pure **deny-by-default ACL** evaluation (tag ownership · edge grants · reachable peers) + the **organization boundary** (`tailnet-of` · `edge-decision` · peering) — shared by governor & coord-LLM, no I/O |
 | `src/kekkai/coordllm.cljc` | **coord-LLM Advisor** — `mock-advisor` ‖ `llm-advisor` (`langchain.model`); admit / netmap / route proposals |
-| `src/kekkai/governor.cljc` | **TailnetGovernor** — node-key validity · tag ownership · deny-by-default · route-no-hijack · no-actuation · high-stakes |
+| `src/kekkai/governor.cljc` | **TailnetGovernor** — node-key validity · tenancy (owner/tailnet coherence) · tag ownership · deny-by-default · **cross-tailnet** · route-no-hijack (per-tailnet) · peering party-check · no-actuation · high-stakes |
 | `src/kekkai/phase.cljc` | **Phase 0→3** — observe-only → assisted → supervised (admission & exit always human) |
 | `src/kekkai/operation.cljc` | **CoordinationActor** — langgraph-clj StateGraph; ingest vs assess flows |
 | `src/kekkai/cacao.clj` | agent-side **CACAO self-mint** (JVM Ed25519 + did:key + CBOR; per-actor node key) |
 | `src/kekkai/kotoba.clj` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
 | `src/kekkai/sim.cljc` | demo driver |
-| `test/kekkai/*_test.clj` | zero-trust contract · store parity (Mem≡Datomic) · CACAO — **19 tests / 66 assertions** |
+| `src/kekkai/query.cljc` | actor 不要の読み取り — `authorized?`（在籍）と `reachable?`（**組織境界込みの**到達可否）は別の問い |
+| `test/kekkai/*_test.clj` | zero-trust contract · **組織境界**（`tenant_test.clj`）· store parity (Mem≡Datomic) · CACAO — **95 tests / 272 assertions** |
 
 ## Tailscale → kekkai mapping
 
@@ -91,7 +135,9 @@ ledger → swaps to DatomicStore with identical results.
 | coordination server (control plane) | the `CoordinationActor` (sealed coord-LLM) |
 | node key (WireGuard / machine identity) | the node's `did:key`; the actor's own key = its kotoba graph |
 | machine approval | `:node/admit` → high-stakes → human admin (`interrupt-before`) |
-| ACL policy (HuJSON, deny-by-default) | `kekkai.acl` over the published `:policy` datom |
+| ACL policy (HuJSON, deny-by-default) | `kekkai.acl` over each tailnet's published `:policy` datom |
+| tailnet (one org's network) | `:tailnet` — **first-class**、複数組織が1つの制御面に同居する |
+| node sharing between tailnets | `:peering` — 両組織の承認が要る directional grant（Tailscale の共有より明示的） |
 | netmap (peer map a node receives) | `:access/assess` → committed netmap assessment |
 | subnet routes / exit nodes | `:route/advertise` (observe) → `:route/approve` (exit = human) |
 | `tailscale up` actuating WireGuard | **out of scope by charter** — the node does this, not the actor: [`kekkai-node`](https://github.com/kotoba-lang/kekkai-node) |

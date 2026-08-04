@@ -27,13 +27,23 @@
 
 (defn- request->record
   "Map an ingest request to a store ground-datom record."
-  [{:keys [op node user route value]}]
+  [{:keys [op node user route tailnet peering value]}]
   (case op
-    :node/register   {:kind :node      :id node  :value value}
-    :node/heartbeat  {:kind :heartbeat :id node  :value value}
-    :user/register   {:kind :user      :id user  :value value}
-    :acl/publish     {:kind :policy     :id "the" :value value}
-    :route/advertise {:kind :route     :id route :value value}))
+    :node/register    {:kind :node      :id node    :value value}
+    :node/heartbeat   {:kind :heartbeat :id node    :value value}
+    :user/register    {:kind :user      :id user    :value value}
+    :tailnet/register {:kind :tailnet   :id tailnet :value value}
+    ;; A peering is PROPOSED as a ground fact and carries no approvals: the
+    ;; approvals are separate, governed ops (:peering/approve). Letting the
+    ;; proposer seed :approved-by would let one organization write down the
+    ;; other's consent.
+    :peering/propose  {:kind :peering   :id peering
+                       :value (assoc value :approved-by [] :status "active")}
+    ;; One ACL document per tailnet. `:tailnet` defaults through
+    ;; store/policy-key, so a pre-tenant caller that publishes without naming
+    ;; one still lands on the default tailnet rather than a new orphan key.
+    :acl/publish      {:kind :policy    :id (store/policy-key tailnet) :value value}
+    :route/advertise  {:kind :route     :id route   :value value}))
 
 (defn- subject [{:keys [node user]}] (or node user))
 
@@ -68,14 +78,25 @@
 (defn- commit-effects!
   "Apply the op-specific control-plane write on commit. Admission flips the
   node to authorized (a membership record, NOT a data-plane push); route
-  approval flips the advertised route's approved? flag. Both are recorded as
-  ground datoms — never a WireGuard actuation."
-  [store {:keys [op node route]}]
+  approval flips the advertised route's approved? flag; peering approval adds
+  ONE organization's consent. All are recorded as ground datoms — never a
+  WireGuard actuation.
+
+  The peering write adds `:as` to `:approved-by` and never sets the whole
+  vector, because the two organizations approve in two separate runs of this
+  graph. Writing the vector would let whichever org committed second erase the
+  first one's consent — and `acl/peering-active?` demands both, so the erased
+  approval would silently close a path everyone believed was open."
+  [store {:keys [op node route peering as]}]
   (case op
     :node/admit    (store/record-datom! store {:kind :node :id node :value {:status "authorized"}})
     :route/approve (when-let [r (first (filter #(= route (:id %)) (store/routes-of store node)))]
                      (store/record-datom! store {:kind :route :id route
                                                  :value (assoc r :approved? true)}))
+    :peering/approve
+    (when-let [pr (first (filter #(= peering (:id %)) (store/all-peerings store)))]
+      (store/record-datom! store {:kind :peering :id peering
+                                  :value {:approved-by (vec (distinct (conj (vec (:approved-by pr)) as)))}}))
     nil))
 
 (defn build

@@ -33,7 +33,10 @@
   human) and a rogue one yields :deny (governor also holds)."
   [st {:keys [node now] :or {now store/demo-now}}]
   (let [nd     (store/node st node)
-        policy (store/policy st)
+        ;; the node's OWN tailnet's policy — tag ownership is an organization's
+        ;; own question, and reading it from another org's ACL would let one
+        ;; org's tag-owners decide who may claim a tag in another.
+        policy (store/policy-of st (acl/tailnet-of nd))
         key-ok? (and nd (not (str/blank? (:did nd))) (not= "revoked" (:status nd))
                      (number? (:key-expiry nd)) (> (:key-expiry nd) now))
         bad-tags (acl/unowned-tags policy nd)
@@ -50,13 +53,13 @@
   "Derive node N's reachable-peer netmap from the deny-by-default ACL."
   [st {:keys [node now] :or {now store/demo-now}}]
   (let [nd     (store/node st node)
-        policy (store/policy st)
-        peers  (acl/reachable-peers policy nd (store/all-nodes st) now)]
+        peers  (acl/reachable-peers (store/plane st) nd (store/all-nodes st) now)]
     {:recommendation :reachable
      :peers      peers
      :summary    (str node " netmap: " (count peers) " peer 到達可")
-     :rationale  (str "ACL grant 由来の到達集合: "
-                      (str/join ", " (map #(str (:peer %) (:ports %)) peers)))
+     :rationale  (str "ACL grant / peering 由来の到達集合: "
+                      (str/join ", " (map #(str (:peer %) (:ports %)
+                                                "(" (name (:via %)) ")") peers)))
      :cites      [:policy :node]
      :effect     :netmap
      :confidence (if nd 0.88 0.3)}))
@@ -74,11 +77,38 @@
      :effect     :netmap
      :confidence (if r 0.8 0.2)}))
 
+(defn- assess-peering
+  "Summarize what ONE organization would be consenting to.
+
+  The advisor's job here is exposition, not judgment: whether to peer with
+  another organization is not a question a sealed model gets to answer, and
+  the governor routes every peering approval to a human regardless of what
+  comes back. What the human needs is the thing that is easy to skim past —
+  the grants that would open **inbound**, from the other side toward theirs."
+  [st {:keys [peering as]}]
+  (let [pr (first (filter #(= peering (:id %)) (store/all-peerings st)))
+        other (first (disj (acl/peering-endpoints pr) as))
+        inbound (acl/peering-grants pr other)
+        outbound (acl/peering-grants pr as)]
+    {:recommendation (if pr :peer :deny)
+     :peering peering
+     :summary (str peering ": " as " ⇄ " other
+                   " (inbound " (count inbound) " / outbound " (count outbound) " grant)")
+     :rationale (str "この承認で " other " 側から " as " へ開く経路: "
+                     (if (seq inbound)
+                       (str/join ", " (map #(str (:src %) "→" (:dst %) (:ports %)) inbound))
+                       "なし")
+                     "。既存承認: " (pr-str (:approved-by pr)) "。")
+     :cites [:peerings]
+     :effect :peering-record
+     :confidence (if pr 0.75 0.2)}))
+
 (defn infer [st {:keys [op] :as req}]
   (case op
-    :node/admit    (assess-admit st req)
-    :access/assess (assess-access st req)
-    :route/approve (assess-route st req)
+    :node/admit      (assess-admit st req)
+    :access/assess   (assess-access st req)
+    :route/approve   (assess-route st req)
+    :peering/approve (assess-peering st req)
     {:recommendation :unknown :summary "未対応" :rationale (str op)
      :cites [] :effect :noop :confidence 0.0}))
 
@@ -99,8 +129,23 @@
        "deny-by-default: ACL grant のない到達は提案しない。"))
 
 (defn- facts-for [st {:keys [node]}]
-  {:node (store/node st node) :policy (store/policy st)
-   :nodes (store/all-nodes st) :routes (store/routes-of st node)})
+  (let [nd (store/node st node)
+        tn (acl/tailnet-of nd)
+        peerings (filterv #(contains? (acl/peering-endpoints %) tn)
+                          (store/all-peerings st))
+        ;; Visible tailnets = my own, plus any I hold an ACTIVE (mutually
+        ;; approved) peering with. A sealed advisor shown a third
+        ;; organization's machine list can propose an edge into it and can
+        ;; leak it into a rationale; restricting the fact set means the
+        ;; unreachable is also the unmentionable. Peered orgs are visible
+        ;; because both of them consented — visibility is what they agreed to.
+        visible (into #{tn} (comp (filter acl/peering-active?)
+                                  (mapcat acl/peering-endpoints))
+                      peerings)]
+    {:node nd :tailnet tn :policy (store/policy-of st tn)
+     :nodes (filterv #(contains? visible (acl/tailnet-of %)) (store/all-nodes st))
+     :peerings peerings
+     :routes (store/routes-of st node)}))
 
 (defn- parse-proposal [content]
   (let [p (try (edn/read-string (str/trim (str content)))

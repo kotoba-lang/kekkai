@@ -14,19 +14,54 @@
   un-permitted reachability edge, or a route hijack); a clean admission/exit
   still routes to a human (high-stakes).
 
+  ## The organization boundary is a governor invariant, not an ACL rule
+
+  One control plane serves many organizations (ADR-2608040100). A tailnet is
+  one organization's overlay, and the boundary between two of them is enforced
+  HERE, structurally, because it cannot be enforced by the policy language: ACL
+  selectors are bare tokens, so two organizations that each named a tag
+  `tag:server` match each other's grants. No rule anyone writes fixes that —
+  the fix is to settle the boundary before any grant is consulted
+  (`acl/edge-decision`), on a field the policy does not own.
+
+  Crossing it requires a **peering**: a record naming both tailnets, carrying
+  its own directional grants, valid only once BOTH organizations approved it.
+  Approval is always a human call, like machine admission.
+
   HARD invariants:
     :node/admit
       1. Valid node key   — node presents a did:key, status ≠ revoked, key not
                             expired (key-expiry > now).
-      2. Tag ownership     — every tag the node claims is authorized for its
-                            owner by the policy's tag-owners (no self-escalation).
-      3. No-actuation      — effect must be :netmap (a control-plane record),
+      2. Tenancy           — the claimed tailnet is registered and active, and
+                            the node's OWNER belongs to it. Without the owner
+                            check, any org's admin could enroll a machine into
+                            any other org by naming its tailnet.
+      3. Tag ownership     — every tag the node claims is authorized for its
+                            owner by THAT TAILNET's tag-owners (no self-
+                            escalation, and no other org deciding who may
+                            claim a tag here).
+      4. No-actuation      — effect must be :netmap (a control-plane record),
                             never a data-plane / WireGuard push.
     :access/assess
       1. Valid node key on the subject AND every proposed peer.
       2. Deny-by-default   — every proposed reachability edge is backed by an
                             ACL grant; an unbacked edge is rejected.
-      3. No-actuation.
+      3. Organization boundary — an edge into another tailnet is rejected
+                            unless a mutually-approved peering carries a grant
+                            for that direction (:cross-tailnet). Checked
+                            BEFORE grants, so a colliding tag name can never
+                            make a cross-org edge look 'backed by a grant'.
+      4. No-actuation.
+    :peering/approve
+      1. Valid node key on the approving node.
+      2. Party             — the peering exists, names two distinct registered
+                            tailnets, `:as` is one of them, and the approving
+                            node actually belongs to `:as`. Nobody signs for
+                            an organization they are not in.
+      3. No foreign grants — every grant originates at one of the two
+                            endpoints; a third org's `:from` would smuggle in
+                            a path for a party that signed nothing.
+      4. No-actuation      — effect must be :peering-record.
     :route/approve
       1. Valid node key on the advertising node.
       2. No-hijack         — the cidr is not already approved for a DIFFERENT
@@ -97,10 +132,10 @@
                             reputation itself.
   SOFT:
     4. Confidence floor → escalate.
-    5. Node admission, exit-route approval, treasury release, witness
-       disputes, AND availability slashing are all high-stakes → ALWAYS
-       human. Disputes go further than the others: confidence is
-       irrelevant, there is no path to :ok? at all for this op."
+    5. Node admission, exit-route approval, PEERING APPROVAL, treasury
+       release, witness disputes, AND availability slashing are all
+       high-stakes → ALWAYS human. Disputes go further than the others:
+       confidence is irrelevant, there is no path to :ok? at all for that op."
   (:require [clojure.string :as str]
             [kekkai.acl :as acl]
             [kekkai.store :as store]))
@@ -154,29 +189,75 @@
     (empty? proposed)       false
     :else                   (every? (set granted) proposed)))
 
-(defn- deny-by-default-violations [policy subject proposal st now]
+(defn- deny-by-default-violations [subject proposal st now]
   ;; every proposed peer edge must be backed by a grant AND the peer must be a
   ;; live authorized node — zero-trust: no implicit allow. A grant existing at
   ;; all is not enough: the proposal's claimed :ports must also fit inside the
   ;; grant's actual allowed ports, or a proposal can silently over-claim
   ;; access (e.g. claiming ["*"] against a grant scoped to [22 443]) and still
   ;; pass as "backed by a grant."
-  (->> (:peers proposal)
-       (keep (fn [{:keys [peer ports]}]
-               (let [pn (store/node st peer)
-                     granted (acl/edge-allowed? policy subject pn)]
-                 (cond
-                   (seq (key-violations pn now peer))
-                   {:rule :peer-key-invalid :detail (str "到達先ノード鍵が無効: " peer)}
-                   (not= "authorized" (:status pn))
-                   {:rule :peer-unauthorized :detail (str "到達先が未認可: " peer)}
-                   (nil? granted)
-                   {:rule :deny-by-default
-                    :detail (str "ACL grant のない到達edgeを提案: → " peer)}
-                   (not (ports-within-grant? granted (or ports [])))
-                   {:rule :deny-by-default
-                    :detail (str "grant の許可範囲(" granted ")を超えるportを提案: → " peer " " ports)}))))
-       vec))
+  ;;
+  ;; The decision comes from acl/edge-decision, which settles the ORGANIZATION
+  ;; boundary before it looks at any grant. That ordering is the whole point:
+  ;; two orgs that both named a tag `tag:server` would otherwise match each
+  ;; other's grants, and the resulting edge would look perfectly "backed by a
+  ;; grant" to a check that only asked whether some grant matched.
+  (let [plane (store/plane st)]
+    (->> (:peers proposal)
+         (keep (fn [{:keys [peer ports]}]
+                 (let [pn (store/node st peer)
+                       d  (acl/edge-decision plane subject pn)]
+                   (cond
+                     (seq (key-violations pn now peer))
+                     {:rule :peer-key-invalid :detail (str "到達先ノード鍵が無効: " peer)}
+                     (not= "authorized" (:status pn))
+                     {:rule :peer-unauthorized :detail (str "到達先が未認可: " peer)}
+                     (= :cross-tailnet (:reason d))
+                     {:rule :cross-tailnet
+                      :detail (str "組織(tailnet)を跨ぐ到達edgeを提案。有効な peering が無い: "
+                                   (:from d) " → " (:to d) " (" peer ")")}
+                     (= :peering-grant-missing (:reason d))
+                     {:rule :cross-tailnet
+                      :detail (str "peering " (:peering d) " に " (:from d)
+                                   " 発の grant が無い到達edgeを提案: → " peer)}
+                     (not (:allowed? d))
+                     {:rule :deny-by-default
+                      :detail (str "ACL grant のない到達edgeを提案: → " peer)}
+                     (not (ports-within-grant? (:ports d) (or ports [])))
+                     {:rule :deny-by-default
+                      :detail (str "grant の許可範囲(" (:ports d) ")を超えるportを提案: → "
+                                   peer " " ports)}))))
+         vec)))
+
+(defn- tenancy-violations
+  "The organization boundary as an admission question rather than a
+  reachability one.
+
+  A node is admitted into exactly one tailnet, and three things have to agree
+  before that admission means anything: the tailnet exists and is active, the
+  owner belongs to it, and — because tag ownership is read from the tailnet's
+  own policy — the node is not claiming membership of an organization that has
+  not published a policy at all. Skipping the owner check would let any
+  organization's admin enroll a machine into any other organization simply by
+  naming its tailnet in the registration."
+  [st nd]
+  (let [tn-id (acl/tailnet-of nd)
+        tn    (store/tailnet st tn-id)
+        owner (store/user st (:user nd))]
+    (cond-> []
+      ;; The default tailnet is allowed to have no record: it is where every
+      ;; pre-tenant node already lives, and demanding registration for it would
+      ;; deny an existing deployment its entire node set on upgrade.
+      (and (nil? tn) (not= acl/default-tailnet tn-id))
+      (conj {:rule :no-tailnet
+             :detail (str "未登録の tailnet に所属を主張: " tn-id)})
+      (and tn (not= "active" (:status tn)))
+      (conj {:rule :tailnet-inactive
+             :detail (str "tailnet が active でない: " tn-id " (" (:status tn) ")")})
+      (and owner (not= tn-id (acl/tailnet-of owner)))
+      (conj {:rule :owner-tailnet-mismatch
+             :detail (str "所有者 " (:user nd) " は tailnet " (acl/tailnet-of owner)
+                          " の所属で、" tn-id " へノードを持ち込めない")}))))
 
 (defn- witness-verdict-violations
   "Deny-by-default for value release (ADR-2607110300 Phase 3): mirrors
@@ -260,15 +341,85 @@
       :detail (str "actor はノードの残高/reputationを直接動かさない(govern は record のみ)。effect="
                    (:effect proposal))}]))
 
-(defn- hijack-violations [st node-id route]
+(defn- hijack-violations
+  "A route takeover is a conflict WITHIN one organization's tailnet.
+
+  Scoped per-tailnet because private address space is shared by design:
+  10.0.0.0/24 is not a globally unique name, and two organizations both
+  advertising it is the normal case, not a hijack. A global scan reports the
+  second organization to register a perfectly ordinary RFC1918 subnet as
+  hijacking the first — and, worse, the first org learns of the second's
+  internal addressing from the denial. The check that matters is whether
+  SOMEONE ELSE IN MY OWN TAILNET already owns this prefix."
+  [st node-id route]
   (when route
-    (let [conflict (->> (store/all-routes st)
+    (let [tn (acl/tailnet-of (store/node st node-id))
+          conflict (->> (store/all-routes st)
                         (filter #(and (= (:cidr route) (:cidr %))
                                       (not= node-id (:node %))
-                                      (:approved? %))))]
+                                      (:approved? %)
+                                      (= tn (acl/tailnet-of (store/node st (:node %)))))))]
       (when (seq conflict)
         [{:rule :route-hijack
-          :detail (str (:cidr route) " は既に別ノードに承認済み: " (mapv :node conflict))}]))))
+          :detail (str (:cidr route) " は同一 tailnet(" tn ") 内で既に別ノードに承認済み: "
+                       (mapv :node conflict))}]))))
+
+;; ───────────────────────── peering (cross-org) ─────────────────────────
+
+(defn- peering-actuation-violations
+  "Same no-actuation philosophy as actuation-violations, scoped to peering: an
+  approved proposal must resolve to a :peering-record, never a netmap this
+  governor publishes on the strength of a peering that is still one signature
+  short."
+  [proposal]
+  (when (not= :peering-record (:effect proposal))
+    [{:rule :no-actuation
+      :detail (str "actor は peering の記録のみを行う(netmap 発行は別 op)。effect="
+                   (:effect proposal))}]))
+
+(defn- peering-violations
+  "A peering approval is one organization speaking for itself, and nothing else.
+
+  `request` carries `:peering` (the record's id) and `:as` (the tailnet the
+  approver is acting for). The invariants:
+
+    1. The peering exists and names two DISTINCT, registered tailnets. A
+       self-peering would be a second, quieter way to answer an intra-tailnet
+       reachability question that the ACL already answers.
+    2. `:as` is one of the two endpoints. Otherwise a third organization —
+       or the actor itself — could sign on behalf of parties to an agreement
+       it is not part of.
+    3. The approving node belongs to `:as`. Holding a valid node key is not
+       the same as holding it in the organization being committed.
+    4. Every grant the peering carries is directional and originates at one of
+       the two endpoints — an `:from` naming a third tailnet would smuggle a
+       path for an organization that never signed anything."
+  [st request]
+  (let [pr    (first (filter #(= (:peering request) (:id %)) (store/all-peerings st)))
+        as    (:as request)
+        ends  (when pr (acl/peering-endpoints pr))
+        subj  (store/node st (:node request))]
+    (cond-> []
+      (nil? pr)
+      (conj {:rule :no-peering :detail (str "未登録の peering: " (:peering request))})
+
+      (and pr (or (not= 2 (count ends)) (some nil? ends)))
+      (conj {:rule :peering-self
+             :detail (str "peering は異なる2つの tailnet を指す必要がある: " ends)})
+
+      (and pr (not (contains? ends as)))
+      (conj {:rule :not-a-party
+             :detail (str "承認者 tailnet " as " はこの peering の当事者ではない: " ends)})
+
+      (and pr subj (not= as (acl/tailnet-of subj)))
+      (conj {:rule :approver-tailnet-mismatch
+             :detail (str "承認ノード " (:node request) " は tailnet "
+                          (acl/tailnet-of subj) " 所属で、" as " を代表できない")})
+
+      (and pr (seq (remove #(contains? ends (:from %)) (:grants pr))))
+      (conj {:rule :foreign-grant
+             :detail (str "当事者でない tailnet 発の grant を含む: "
+                          (mapv :from (remove #(contains? ends (:from %)) (:grants pr))))}))))
 
 (defn check
   "Censors a coord-LLM proposal for a tailnet op. Returns
@@ -278,19 +429,27 @@
    route approval are high-stakes → human admin sign-off even when clean."
   [request proposal st]
   (let [now    (now-of request)
-        policy (store/policy st)
         subj   (store/node st (:node request))
+        ;; the SUBJECT's own tailnet policy — never a global one. Reading tag
+        ;; ownership from another organization's ACL would let that org decide
+        ;; who may claim a tag here.
+        policy (store/policy-of st (acl/tailnet-of subj))
         route  (when (= :route/approve (:op request))
                  (first (filter #(= (:route request) (:id %)) (store/routes-of st (:node request)))))
         hard (case (:op request)
                :node/admit
                (into [] (concat (key-violations subj now (:node request))
+                                (tenancy-violations st subj)
                                 (tag-violations policy subj)
                                 (actuation-violations proposal)))
                :access/assess
                (into [] (concat (key-violations subj now (:node request))
-                                (deny-by-default-violations policy subj proposal st now)
+                                (deny-by-default-violations subj proposal st now)
                                 (actuation-violations proposal)))
+               :peering/approve
+               (into [] (concat (key-violations subj now (:node request))
+                                (peering-violations st request)
+                                (peering-actuation-violations proposal)))
                :route/approve
                (into [] (concat (key-violations subj now (:node request))
                                 (hijack-violations st (:node request) route)
@@ -317,6 +476,9 @@
                     (= :treasury/release (:op request))
                     (= :witness/dispute (:op request))
                     (= :availability/slash (:op request))
+                    ;; opening a path between two organizations is at least as
+                    ;; consequential as admitting one machine — always human.
+                    (= :peering/approve (:op request))
                     (and (= :route/approve (:op request)) (= "exit" (:kind route))))
         hard?   (boolean (seq hard))]
     {:ok?          (and (not hard?) (not low?) (not stakes?))
@@ -331,6 +493,7 @@
         :treasury/release :treasury-hold
         :witness/dispute :witness-dispute-hold
         :availability/slash :availability-slash-hold
+        :peering/approve :peering-hold
         :tailnet-hold)
    :op (:op request) :node (:node request)
    :disposition :hold :basis (mapv :rule (:violations verdict))
