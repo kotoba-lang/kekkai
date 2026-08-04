@@ -277,3 +277,25 @@
     (let [p (coordllm/infer s {:op :access/assess :node "n-laptop" :now now})]
       (is (contains? (set (map :peer (:peers p))) "a-cache"))
       (is (= :peering (:via (first (filter #(= "a-cache" (:peer %)) (:peers p)))))))))
+
+;; ── a record has to know its own id ─────────────────────────────────────
+
+(deftest a-peering-recorded-without-an-id-in-its-value-is-still-findable
+  (testing "the id is already the map key, so omitting it from the value is
+            the natural thing to do — and it produced a peering that exists
+            and that nobody can find: every approval rejected as :no-peering.
+            Found by cloud-itonami's round-trip against a real store; every
+            fixture in this repo happened to include :id."
+    (let [s (store/->MemStore (atom {:assessments {} :ledger []}))]
+      (store/record-datom! s {:kind :peering :id "p-x"
+                              :value {:a "one" :b "two" :status "active"
+                                      :approved-by ["one" "two"]}})
+      (is (= "p-x" (:id (first (store/all-peerings s)))))
+      (is (some? (acl/active-peering (store/all-peerings s) "one" "two")))
+      (is (= ["p-x"] (mapv :id (q/peerings-of s "one")))))))
+
+(deftest a-tailnet-recorded-without-an-id-in-its-value-is-still-findable
+  (let [s (store/->MemStore (atom {:assessments {} :ledger []}))]
+    (store/record-datom! s {:kind :tailnet :id "t-x" :value {:org "o" :status "active"}})
+    (is (= "t-x" (:id (store/tailnet s "t-x"))))
+    (is (= ["t-x"] (mapv :id (store/all-tailnets s))))))
