@@ -195,18 +195,28 @@
   (all-routes [_] (sort-by :id (vals (:routes @a))))
   (assessment-of [_ id] (get-in @a [:assessments id]))
   (ledger [_] (:ledger @a))
+  ;; `:tailnet` and `:peering` get `:id` stamped into the stored VALUE, not
+  ;; just used as the map key. `all-tailnets`/`all-peerings` return values, and
+  ;; every consumer that then looks a record up — governor/peering-violations,
+  ;; acl/active-peering, query/peerings-of — matches on `(:id record)`. A
+  ;; caller who passes the id as the record key but omits it from the value
+  ;; (the natural thing to do, since the key already says it) produces a record
+  ;; that is stored correctly and found by nobody: the peering exists, and
+  ;; every approval of it is rejected as `:no-peering`. Caught by
+  ;; cloud-itonami's round-trip test against a real store, not by any test
+  ;; that constructed its own fixtures — those all happened to include `:id`.
   (record-datom! [s {:keys [kind id value]}]
     (case kind
       :user       (swap! a update-in [:users id] merge value)
       :node       (swap! a update-in [:nodes id] merge value)
-      :tailnet    (swap! a update-in [:tailnets id] merge value)
+      :tailnet    (swap! a update-in [:tailnets id] #(assoc (merge % value) :id id))
       ;; A policy is REPLACED, never merged: an ACL is a whole document, and
       ;; merging a new one over the old leaves revoked grants in place.
       :policy     (swap! a assoc-in [:policies (policy-key id)] value)
       ;; A peering IS merged, because the two approvals arrive in separate
       ;; ops from two different organizations; replacing would drop whichever
       ;; approval landed first.
-      :peering    (swap! a update-in [:peerings id] merge value)
+      :peering    (swap! a update-in [:peerings id] #(assoc (merge % value) :id id))
       :route      (swap! a assoc-in [:routes id] value)
       :heartbeat  (swap! a update-in [:heartbeats id] (fnil conj []) value)
       :assessment (swap! a assoc-in [:assessments id] value)
@@ -303,14 +313,16 @@
     (case kind
       :user       (tx* s [{:user/id id :user/edn (enc (merge (user s id) value))}])
       :node       (tx* s [{:node/id id :node/edn (enc (merge (node s id) value))}])
-      :tailnet    (tx* s [{:tailnet/id id :tailnet/edn (enc (merge (tailnet s id) value))}])
+      :tailnet    (tx* s [{:tailnet/id id
+                           :tailnet/edn (enc (assoc (merge (tailnet s id) value) :id id))}])
       ;; replaced, not merged — an ACL is a whole document (see MemStore).
       :policy     (tx* s [{:policy/id (policy-key id) :policy/edn (enc value)}])
       ;; merged — the two orgs' approvals arrive as separate ops (see MemStore).
       :peering    (tx* s [{:peering/id id
-                           :peering/edn (enc (merge (first (filter #(= id (:id %))
-                                                                   (all-peerings s)))
-                                                    value))}])
+                           :peering/edn (enc (assoc (merge (first (filter #(= id (:id %))
+                                                                          (all-peerings s)))
+                                                           value)
+                                                    :id id))}])
       :route      (tx* s [{:route/id id :route/edn (enc value)}])
       :heartbeat  (tx* s [{:hb/node id :hb/edn (enc value)}])
       :assessment (tx* s [{:assessment/id id :assessment/edn (enc value)}])
