@@ -22,8 +22,22 @@
   wrong (fund release has nothing to do with tailnet maturity).")
 
 (def record-ops #{:node/register :node/heartbeat :user/register
+                  :tailnet/register :peering/propose
                   :acl/publish :route/advertise})
 (def assess-ops #{:node/admit :access/assess :route/approve})
+
+(def tenancy-ops
+  "Cross-organization ops (ADR-2608040100): approving a peering opens a path
+  between two tailnets.
+
+  Active at every phase, including 0, for the same reason :treasury/release
+  is: it never auto-commits (always high-stakes, see governor.cljc), so there
+  is no rollout ladder for it to climb. Gating it behind the NETWORK phase
+  would be worse than pointless — a shadow-mode deployment still has to be
+  able to record that two organizations agreed, and withholding the *approval*
+  op while `:peering/propose` records freely would leave proposals piling up
+  with no way to consummate or refuse them."
+  #{:peering/approve})
 
 ;; ADR-2607110300 Phase 3: value governance (fund release) is orthogonal to
 ;; the tailnet rollout ladder below -- a system can govern fund release
@@ -37,11 +51,13 @@
 ;; StateGraph, until dispute-resolution semantics are actually designed.
 (def value-ops #{:treasury/release})
 
+(def ^:private always-on (into value-ops tenancy-ops))
+
 (def phases
-  {0 {:label "observe-only" :assess value-ops                   :auto #{}}
-   1 {:label "assisted"     :assess (into assess-ops value-ops) :auto #{}}
-   2 {:label "assisted-net" :assess (into assess-ops value-ops) :auto #{:access/assess :route/approve}}
-   3 {:label "supervised"   :assess (into assess-ops value-ops) :auto #{:access/assess :route/approve}}})
+  {0 {:label "observe-only" :assess always-on                   :auto #{}}
+   1 {:label "assisted"     :assess (into assess-ops always-on) :auto #{}}
+   2 {:label "assisted-net" :assess (into assess-ops always-on) :auto #{:access/assess :route/approve}}
+   3 {:label "supervised"   :assess (into assess-ops always-on) :auto #{:access/assess :route/approve}}})
 
 (def default-phase
   "The phase used when `context` carries no :phase at all

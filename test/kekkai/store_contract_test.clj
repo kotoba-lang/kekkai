@@ -3,6 +3,8 @@
   'swap the SSoT for Datomic / kotoba-server' a config change, not a rewrite.
   Integer-scaled domain values (epoch-second key-expiry, ports) round-trip."
   (:require [clojure.test :refer [deftest is testing]]
+            [kekkai.acl :as acl]
+            [kekkai.query :as query]
             [kekkai.store :as store]
             [langchain.db :as db]))
 
@@ -14,13 +16,24 @@
       (is (= "alice-mbp" (:hostname (store/node s "n-laptop"))))
       (is (= (+ store/demo-now 7776000) (:key-expiry (store/node s "n-laptop")))
           "epoch-second key-expiry preserved as integer")
-      (is (= ["n-gw" "n-laptop" "n-pending" "n-rogue" "n-server"]
+      ;; two organizations on one control plane: alice's five nodes plus
+      ;; acme's two. `all-nodes` is deliberately plane-wide — the boundary is
+      ;; enforced on the reachability decision, not by hiding rows from the
+      ;; store (a store that lied about what exists could not detect an id
+      ;; collision between organizations).
+      (is (= ["a-cache" "a-server" "n-gw" "n-laptop" "n-pending" "n-rogue" "n-server"]
              (mapv :id (store/all-nodes s))))
+      (is (= ["n-gw" "n-laptop" "n-pending" "n-rogue" "n-server"]
+             (mapv :id (query/nodes-of s acl/default-tailnet)))
+          "scoped to one tailnet, alice sees only her own")
       (is (= "admin" (:role (store/user s "alice"))))
       (is (= [22 443] (-> (store/policy s) :grants first :ports)) "ACL ports preserved")
       (is (= ["alice"] (get-in (store/policy s) [:tag-owners "tag:server"])))
       (is (= "10.0.0.0/24" (:cidr (first (store/routes-of s "n-server")))))
-      (is (= 2 (count (store/all-routes s))))
+      ;; three: alice's subnet + exit, and acme's identical 10.0.0.0/24. Two
+      ;; organizations advertising the same RFC1918 prefix is the normal case,
+      ;; which is why the hijack check is scoped per-tailnet.
+      (is (= 3 (count (store/all-routes s))))
       (is (= "203.0.113.7:41641" (:endpoint (first (store/heartbeats-of s "n-laptop")))))
       (is (nil? (store/node s "n-missing"))))))
 
@@ -39,6 +52,44 @@
       (store/append-ledger! s {:op :a :disposition :record})
       (store/append-ledger! s {:op :b :disposition :commit})
       (is (= [:record :commit] (mapv :disposition (store/ledger s)))))))
+
+(deftest tenant-plane-parity
+  (doseq [[label s] (backends)]
+    (testing label
+      (testing "one ACL document per organization, not one global policy"
+        (is (= ["alice"] (get-in (store/policy-of s "default") [:tag-owners "tag:server"])))
+        (is (= ["bob"] (get-in (store/policy-of s "acme") [:tag-owners "tag:server"]))
+            "the SAME tag name, owned by different people in different orgs")
+        (is (= #{"default" "acme"} (set (keys (store/all-policies s))))))
+
+      (testing "a policy is replaced, never merged — a merged ACL keeps revoked grants"
+        (store/record-datom! s {:kind :policy :id "acme" :value {:grants []}})
+        (is (= {:grants []} (store/policy-of s "acme")))
+        (is (nil? (get-in (store/policy-of s "acme") [:tag-owners "tag:server"]))))
+
+      (testing "a peering IS merged — the two approvals arrive in separate ops"
+        (store/record-datom! s {:kind :peering :id "p-alice-acme"
+                                :value {:approved-by ["acme" "default"]}})
+        (let [pr (first (store/all-peerings s))]
+          (is (= ["acme" "default"] (:approved-by pr)))
+          (is (seq (:grants pr)) "the grants the proposal carried survive the approval")))
+
+      (testing "tailnets round-trip"
+        (is (= #{"default" "acme"} (set (map :id (store/all-tailnets s)))))
+        (is (= "acme corp" (:name (store/tailnet s "acme"))))
+        (is (nil? (store/tailnet s "nope")))))))
+
+(deftest the-legacy-single-policy-id-still-resolves
+  (testing "a pre-tenant caller publishing under the literal id \"the\" must
+            land on the default tailnet, not create an orphan nobody reads"
+    (doseq [[label s] [["MemStore" (store/->MemStore (atom {:policies {} :ledger []}))]
+                       ["DatomicStore" (store/datomic-store)]]]
+      (testing label
+        (store/record-datom! s {:kind :policy :id "the"
+                                :value {:grants [{:src ["a"] :dst ["b"] :ports [1]}]}})
+        (is (some? (store/policy s)))
+        (is (= (store/policy s) (store/policy-of s acl/default-tailnet)))
+        (is (contains? (:policies (store/plane s)) acl/default-tailnet))))))
 
 (deftest datomic-empty-store-usable
   (let [s (store/datomic-store)]

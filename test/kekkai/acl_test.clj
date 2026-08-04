@@ -68,35 +68,42 @@
 
 (def now 1750000000)
 
+;; reachable-peers decides over a PLANE ({:policies {tailnet policy} :peerings}),
+;; not a bare policy, because the organization boundary is settled before any
+;; grant is consulted. These nodes carry no :tailnet, so they all resolve to
+;; acl/default-tailnet and exercise exactly the pre-tenant behavior.
+(def plane {:policies {acl/default-tailnet policy} :peerings []})
+
 (defn- node [id user tags status key-expiry]
   {:id id :user user :tags tags :status status :key-expiry key-expiry})
 
 (deftest reachable-peers-excludes-self
   (let [me (node "n1" "alice" [] "authorized" (+ now 1000))]
-    (is (empty? (acl/reachable-peers policy me [me] now)))))
+    (is (empty? (acl/reachable-peers plane me [me] now)))))
 
 (deftest reachable-peers-excludes-unauthorized-status
   (let [src (node "n1" "carol" ["tag:laptop"] "authorized" (+ now 1000))
         pending-dst (node "n2" "dave" ["tag:server"] "pending" (+ now 1000))]
-    (is (empty? (acl/reachable-peers policy src [pending-dst] now))
+    (is (empty? (acl/reachable-peers plane src [pending-dst] now))
         "a pending (not-yet-approved) node is never reachable regardless of ACL grants")))
 
 (deftest reachable-peers-excludes-expired-keys
   (let [src (node "n1" "carol" ["tag:laptop"] "authorized" (+ now 1000))
         expired-dst (node "n2" "dave" ["tag:server"] "authorized" (- now 1))]
-    (is (empty? (acl/reachable-peers policy src [expired-dst] now)))))
+    (is (empty? (acl/reachable-peers plane src [expired-dst] now)))))
 
 (deftest reachable-peers-excludes-acl-denied-even-when-status-and-key-are-fine
   (let [src (node "n1" "carol" ["tag:laptop"] "authorized" (+ now 1000))
         unrelated-dst (node "n2" "eve" ["tag:desktop"] "authorized" (+ now 1000))]
-    (is (empty? (acl/reachable-peers policy src [unrelated-dst] now)))))
+    (is (empty? (acl/reachable-peers plane src [unrelated-dst] now)))))
 
 (deftest reachable-peers-returns-every-valid-authorized-peer-with-its-ports
   (let [src (node "n1" "carol" ["tag:laptop"] "authorized" (+ now 1000))
         good-dst (node "n2" "dave" ["tag:server"] "authorized" (+ now 1000))
         bad-dst (node "n3" "eve" ["tag:desktop"] "authorized" (+ now 1000))
         candidates [src good-dst bad-dst]]
-    (is (= [{:peer "n2" :ports [22 443]}] (acl/reachable-peers policy src candidates now)))))
+    (is (= [{:peer "n2" :ports [22 443] :via :policy}]
+           (acl/reachable-peers plane src candidates now)))))
 
 ;; ── tag-owned? / unowned-tags: no self-escalation ──────────────────────
 
