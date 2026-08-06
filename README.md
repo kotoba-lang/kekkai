@@ -187,7 +187,24 @@ netmap を消費して peer 間の Noise IK session（[`kotoba-lang/noise`](http
 **charter は変わらない** — actor は依然パケットを運ばず、node 側があのコンポーネントで
 actuate する。受け渡し形式は `:netmap/{version,tailnet,self,peers,edges,relays}` の EDN。
 
+**netmap 発行（2026-08-06、着地）**: `kekkai.netmap` が制御面を
+`:netmap/{version,tailnet,self,peers,edges,relays}` の wire netmap に射影し、
+`kekkai.envelope` が Ed25519 で封をする。README はこの受け渡し形式を以前から
+書いていたが、**それを産出するコードは存在しなかった** — actor は `:netmap`
+制御面レコードを書き、node はファイルを読み、2 つの repo は散文だけで繋がって
+いた。`kekkai-node` 側の `publisher-parity-test` が、ここで作った実 envelope を
+**バイト単位で**検証している（独立に書かれた 2 実装が黙って乖離しないため）。
+
+- **peer/edge は id 順に整列する。** netmap はバイト列として署名されるので順序は
+  署名の一部。入力順を保つ射影は、同じ論理 netmap に 2 つの署名を与える
+  （store 経由と手組みを突き合わせるテストが実際にこれを検出した）。
+- **cross-tailnet peer は active peering があっても発行しない。** `prologue-string`
+  が*発行側の* tailnet を Noise prologue に束縛するので、peering された別
+  tailnet の 2 ノードは異なる prologue を導出して handshake が失敗する。
+  握手できないと分かっている peer を載せるより、除外して理由を言う方がよい
+  （`netmap/excluded` の `:cross-tailnet-not-carriable`）。越境を運ぶには
+  prologue が peering を束縛する必要があり、それはデータ面のプロトコル変更。
+- **relay はまだ制御面レコードではない**（発行時の設定値）。
+
 残り: kotobase.net origin 復帰時の live 結合 1 回・実 LLM（一般 API key）・
-AT-Protocol XRPC（lexicon）境界の配線・kekkai-node への netmap 発行を
-**署名付き**にすること（node 側の検証境界は `kekkai.node.signed-netmap` に
-あるが、この actor はまだ署名 envelope を発行していない）。CI workflow は superproject 実行。
+AT-Protocol XRPC（lexicon）境界の配線。CI workflow は superproject 実行。
