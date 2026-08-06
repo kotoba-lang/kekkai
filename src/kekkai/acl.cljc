@@ -65,6 +65,35 @@
 (defn- selector-matches? [selectors principals]
   (boolean (seq (set/intersection (set selectors) principals))))
 
+(def default-capabilities
+  "What a grant that names no `:capabilities` conveys.
+
+  `:overlay` alone — session establishment and nothing else. Deliberately the
+  floor rather than a useful set: a policy written before a capability existed
+  must not silently start conferring it the day the capability is added. Every
+  richer capability (`:ssh`, `:private-http`, `:tun`) is opt-in per grant."
+  [:overlay])
+
+(defn grant-match
+  "The first grant in `grants` that permits `src-node` → `dst-node`, or nil.
+
+  `grant-allowed?` is the ports-only reading of this same match. Both exist
+  because a netmap needs the whole grant (capabilities as well as ports) while
+  the governor only ever asks the yes/no question — and re-deriving the match
+  in a second place is exactly how the censor and the proposer drift apart."
+  [grants src-node dst-node]
+  (let [sp (principals src-node) dp (principals dst-node)]
+    (some (fn [{:keys [src dst] :as grant}]
+            (when (and (selector-matches? src sp) (selector-matches? dst dp))
+              grant))
+          grants)))
+
+(defn grant-capabilities
+  "The capabilities a matched grant conveys, never empty — see
+  `default-capabilities`."
+  [grant]
+  (vec (or (seq (:capabilities grant)) default-capabilities)))
+
 (defn grant-allowed?
   "Does `grants` (a plain vector) permit `src-node` to reach `dst-node`?
   Returns the matching grant's allowed ports (a vector, possibly [\"*\"]) or
@@ -74,11 +103,8 @@
   reachability must go through `edge-decision`, which applies the org boundary
   first."
   [grants src-node dst-node]
-  (let [sp (principals src-node) dp (principals dst-node)]
-    (some (fn [{:keys [src dst ports]}]
-            (when (and (selector-matches? src sp) (selector-matches? dst dp))
-              (vec ports)))
-          grants)))
+  (when-let [grant (grant-match grants src-node dst-node)]
+    (vec (:ports grant))))
 
 (defn edge-allowed?
   "Does the policy permit `src-node` to reach `dst-node`? Returns the matching
@@ -153,8 +179,9 @@
 
   `plane` is pure data: `{:policies {tailnet-id policy} :peerings [peering]}`.
 
-  Returns `{:allowed? true :ports [...] :via :policy|:peering ...}`, or
-  `{:allowed? false :reason kw ...}` where reason is one of
+  Returns `{:allowed? true :ports [...] :capabilities [...] :via
+  :policy|:peering ...}`, or `{:allowed? false :reason kw ...}` where reason is
+  one of
   `:deny-by-default` (same tailnet, no grant matched), `:cross-tailnet`
   (different tailnets, no mutually-approved peering) or
   `:peering-grant-missing` (peered, but this particular edge is not in the
@@ -169,12 +196,16 @@
   (let [ta (tailnet-of src-node)
         tb (tailnet-of dst-node)]
     (if (= ta tb)
-      (if-let [ports (edge-allowed? (get-in plane [:policies ta]) src-node dst-node)]
-        {:allowed? true :ports ports :via :policy :tailnet ta}
+      (if-let [grant (grant-match (:grants (get-in plane [:policies ta]))
+                                  src-node dst-node)]
+        {:allowed? true :ports (vec (:ports grant))
+         :capabilities (grant-capabilities grant) :via :policy :tailnet ta}
         {:allowed? false :reason :deny-by-default :tailnet ta})
       (if-let [pr (active-peering (:peerings plane) ta tb)]
-        (if-let [ports (grant-allowed? (peering-grants pr ta) src-node dst-node)]
-          {:allowed? true :ports ports :via :peering :peering (:id pr)
+        (if-let [grant (grant-match (peering-grants pr ta) src-node dst-node)]
+          {:allowed? true :ports (vec (:ports grant))
+           :capabilities (grant-capabilities grant)
+           :via :peering :peering (:id pr)
            :from ta :to tb}
           {:allowed? false :reason :peering-grant-missing :peering (:id pr)
            :from ta :to tb})

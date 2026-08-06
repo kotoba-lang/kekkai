@@ -91,6 +91,26 @@
   {:policies (into {} (all-policies s))
    :peerings (vec (all-peerings s))})
 
+(defn netmap-inputs
+  "The pure snapshot `kekkai.netmap/publish` projects into a wire netmap.
+
+  Assembled here for the same reason `plane` is: the projector stays free of
+  I/O, and every node's netmap is cut from one snapshot rather than from a
+  store re-read per peer, which would let a node appear in one node's netmap
+  and not in another's from the same publish.
+
+  `relays` and `version` are the caller's. Relays are still deployment
+  configuration rather than governed control-plane records — an honest gap,
+  named here rather than papered over with an empty default that would publish
+  a relay-less netmap and strand every node behind a NAT."
+  [s {:keys [relays version]}]
+  (let [nodes (vec (all-nodes s))]
+    {:nodes nodes
+     :plane (plane s)
+     :heartbeats (into {} (map (juxt :id #(vec (heartbeats-of s (:id %))))) nodes)
+     :relays (vec relays)
+     :version version}))
+
 ;; ───────────────────────── demo data ─────────────────────────
 ;; A fixed clock so key-expiry checks are deterministic and offline-verifiable.
 (def demo-now 1750000000) ; ~2025-06-15Z, epoch seconds
@@ -120,7 +140,12 @@
    :policies
    {"default"
     {:tag-owners {"tag:server" ["alice"] "tag:laptop" ["alice"] "tag:exit" ["alice"]}
-     :grants [{:src ["tag:laptop"] :dst ["tag:server"] :ports [22 443]}
+     ;; :capabilities is opt-in per grant (kekkai.acl/default-capabilities is
+     ;; [:overlay] alone). The laptop→server grant names :ssh because that is
+     ;; what it is for; the broad alice grant does NOT, so widening a port list
+     ;; never quietly widens what may be done through it.
+     :grants [{:src ["tag:laptop"] :dst ["tag:server"] :ports [22 443]
+               :capabilities [:overlay :ssh]}
               {:src ["alice"]      :dst ["tag:server" "tag:exit"] :ports ["*"]}]}
     "acme"
     {:tag-owners {"tag:server" ["bob"] "tag:cache" ["bob"]}
@@ -132,28 +157,48 @@
     {:id "p-alice-acme" :a "default" :b "acme" :status "active"
      :approved-by ["acme"]
      :grants [{:from "default" :src ["tag:laptop"] :dst ["tag:cache"] :ports [443]}]}}
+   ;; :static-pub and :overlay-ip are DATA-PLANE facts: the control plane admits
+   ;; a device by its did:key, but a peer is dialled by its Noise X25519 static
+   ;; key at an overlay address. They are separate fields because they are
+   ;; separate keys — reusing the did's Ed25519 material as an X25519 static
+   ;; would tie session compromise to identity compromise. Demo values are
+   ;; well-formed 32-byte hex and obviously synthetic.
    :nodes
    {"n-laptop"  {:id "n-laptop"  :hostname "alice-mbp" :os "macos" :did "did:key:zLaptop"
                  :user "alice" :tailnet "default" :tags ["tag:laptop"]
+                 :static-pub "1111111111111111111111111111111111111111111111111111111111111111"
+                 :overlay-ip "100.64.0.1"
                  :key-expiry (+ demo-now 7776000) :status "authorized"}
     "n-server"  {:id "n-server"  :hostname "prod-db"   :os "linux" :did "did:key:zServer"
                  :user "alice" :tailnet "default" :tags ["tag:server"]
+                 :static-pub "2222222222222222222222222222222222222222222222222222222222222222"
+                 :overlay-ip "100.64.0.2"
                  :key-expiry (+ demo-now 7776000) :status "authorized"}
     "n-gw"      {:id "n-gw"      :hostname "edge-gw"   :os "linux" :did "did:key:zGateway"
                  :user "alice" :tailnet "default" :tags ["tag:exit"]
+                 :static-pub "3333333333333333333333333333333333333333333333333333333333333333"
+                 :overlay-ip "100.64.0.3"
                  :key-expiry (+ demo-now 7776000) :status "authorized"}
     "n-pending" {:id "n-pending" :hostname "alice-phone" :os "ios" :did "did:key:zPhone"
                  :user "alice" :tailnet "default" :tags ["tag:laptop"]
+                 :static-pub "4444444444444444444444444444444444444444444444444444444444444444"
+                 :overlay-ip "100.64.0.4"
                  :key-expiry (+ demo-now 7776000) :status "pending"}
     "n-rogue"   {:id "n-rogue"   :hostname "evil-box"  :os "linux" :did "did:key:zRogue"
                  :user "mallory" :tailnet "default" :tags ["tag:server"]
+                 :static-pub "5555555555555555555555555555555555555555555555555555555555555555"
+                 :overlay-ip "100.64.0.5"
                  :key-expiry (- demo-now 3600) :status "pending"}
     ;; acme's node: same tag name, different organization.
     "a-server"  {:id "a-server"  :hostname "acme-db"   :os "linux" :did "did:key:zAcmeDb"
                  :user "bob" :tailnet "acme" :tags ["tag:server"]
+                 :static-pub "6666666666666666666666666666666666666666666666666666666666666666"
+                 :overlay-ip "100.64.1.1"
                  :key-expiry (+ demo-now 7776000) :status "authorized"}
     "a-cache"   {:id "a-cache"   :hostname "acme-cache" :os "linux" :did "did:key:zAcmeCache"
                  :user "bob" :tailnet "acme" :tags ["tag:cache"]
+                 :static-pub "7777777777777777777777777777777777777777777777777777777777777777"
+                 :overlay-ip "100.64.1.2"
                  :key-expiry (+ demo-now 7776000) :status "authorized"}}
    :routes
    {"r-subnet"  {:id "r-subnet"  :node "n-server" :cidr "10.0.0.0/24" :kind "subnet" :approved? false}
