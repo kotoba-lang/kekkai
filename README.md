@@ -109,8 +109,10 @@ clojure -M:lint        # clj-kondo (errors fail)
 ### Cloudflare を使わない netmap 配布
 
 netmap は単一 URL へ push せず、署名済み desired state として複数の独立 root に
-publish できる。root はローカルディスク、共有ボリューム、object-store mount、別々の
-gateway のどれでもよく、信頼対象ではない。node が固定するのは Ed25519 authority
+publish できる。root はローカルディスク、共有ボリューム、object-store mount、または
+`ssh://node/absolute/path` の別ホストを指定でき、いずれも信頼対象ではない。SSH root
+は検証済みの host/path だけを受け入れ、block と head を remote temp file から atomic
+rename する。node が固定するのは Ed25519 authority
 だけで、本文は CIDv1、順序は単調増加 epoch、履歴は previous CID で識別する。同じ
 epoch に異なる CID が見えた場合は多数決せず split brain として停止する。
 

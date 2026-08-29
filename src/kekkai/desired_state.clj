@@ -13,7 +13,7 @@
   (:import [java.nio.file Files StandardCopyOption]
            [java.security KeyFactory Signature]
            [java.security.spec X509EncodedKeySpec]
-           [java.util Base64]))
+           [java.util Base64 UUID]))
 
 (def schema "kekkai.desired-state/v1")
 (def receipt-kind :kekkai/receipt)
@@ -162,6 +162,50 @@
 (defn head-file [root subject]
   (io/file root "heads" (str (subject-key subject) ".edn")))
 
+(defn- remote-root [root]
+  (when (and (string? root) (str/starts-with? root "ssh://"))
+    (let [[_ host path] (re-matches #"ssh://([^/]+)(/.*)" root)]
+      (when-not (and host path
+                     (re-matches #"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+" host)
+                     (re-matches #"[A-Za-z0-9._/-]+" path)
+                     (not (str/includes? path "..")))
+        (throw (ex-info "invalid ssh desired-state mirror root"
+                        {:type :kekkai/invalid-ssh-mirror :root root})))
+      {:host host :path (str/replace path #"/+$" "")})))
+
+(defn- relative-block [cid] (str "blocks/" cid ".edn"))
+(defn- relative-head [subject] (str "heads/" (subject-key subject) ".edn"))
+
+(declare atomic-spit!)
+
+(defn- ssh-process [host command input]
+  (let [process (.start (ProcessBuilder. ^java.util.List ["ssh" host command]))]
+    (when (some? input)
+      (with-open [out (.getOutputStream process)]
+        (.write out (.getBytes ^String input "UTF-8"))))
+    (let [stdout (slurp (.getInputStream process))
+          stderr (slurp (.getErrorStream process))
+          exit (.waitFor process)]
+      (when-not (zero? exit)
+        (throw (ex-info "ssh desired-state mirror operation failed"
+                        {:type :kekkai/ssh-mirror-failed :host host
+                         :exit exit :stderr stderr})))
+      stdout)))
+
+(defn- read-root [root relative]
+  (if-let [{:keys [host path]} (remote-root root)]
+    (ssh-process host (str "cat " path "/" relative) nil)
+    (slurp (io/file root relative))))
+
+(defn- write-root! [root relative text]
+  (if-let [{:keys [host path]} (remote-root root)]
+    (let [target (str path "/" relative)
+          parent (subs target 0 (str/last-index-of target "/"))
+          tmp (str target ".tmp-" (UUID/randomUUID))]
+      (ssh-process host (str "mkdir -p " parent " && cat > " tmp " && mv " tmp " " target)
+                   text))
+    (atomic-spit! (io/file root relative) text)))
+
 (defn- atomic-spit! [file text]
   (let [parent (.getParentFile file)
         _ (.mkdirs parent)
@@ -182,8 +226,12 @@
 
 (defn- current-head [root subject]
   (try
-    (edn/read-string (slurp (head-file root subject)))
-    (catch java.io.FileNotFoundException _ nil)))
+    (edn/read-string (read-root root (relative-head subject)))
+    (catch Exception e
+      (if (or (instance? java.io.FileNotFoundException e)
+              (= :kekkai/ssh-mirror-failed (:type (ex-data e))))
+        nil
+        (throw e)))))
 
 (defn- assert-head-advance! [old-head new-head]
   (when old-head
@@ -218,10 +266,10 @@
                         (try
                           (assert-head-advance!
                            (current-head root (:desired/subject verified)) head)
-                          (atomic-spit! (block-file root (:desired/cid verified))
-                                        (envelope-string envelope))
-                          (atomic-spit! (head-file root (:desired/subject verified))
-                                        (String. (canonical-bytes head) "UTF-8"))
+                          (write-root! root (relative-block (:desired/cid verified))
+                                       (envelope-string envelope))
+                          (write-root! root (relative-head (:desired/subject verified))
+                                       (String. (canonical-bytes head) "UTF-8"))
                           {:root root :ok? true}
                           (catch Exception e
                             {:root root :ok? false :error (.getMessage e)
@@ -244,7 +292,7 @@
   [roots subject authority-spki opts]
   (let [heads (keep (fn [root]
                       (try
-                        (let [head (edn/read-string (slurp (head-file root subject)))]
+                        (let [head (edn/read-string (read-root root (relative-head subject)))]
                           (assoc head :root root))
                         (catch Exception _ nil)))
                     roots)]
@@ -261,7 +309,7 @@
       (let [cid (first cids)
             candidates (keep (fn [{:keys [root]}]
                                (try
-                                 (edn/read-string (slurp (block-file root cid)))
+                                 (edn/read-string (read-root root (relative-block cid)))
                                  (catch Exception _ nil)))
                              latest)
             envelope (first candidates)]
