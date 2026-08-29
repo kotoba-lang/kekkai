@@ -11,7 +11,11 @@
         io.github.kotoba-lang/org-ietf-ed25519
         {:sha "fdcefb9f1b83461fee54d04b63e374fa301ee847"}
         io.github.kotoba-lang/tech-ipfs-specs-ipns
-        {:sha "f2563eb1cb010c96f6dec1dfbd468fac93367498"}}
+        {:sha "f2563eb1cb010c96f6dec1dfbd468fac93367498"}
+        ;; CIDv1(raw, sha2-256) for signed desired-state blocks. Mirrors and
+        ;; heads are discovery only; the CID remains the byte identity.
+        io.github.kotoba-lang/io-multiformats
+        {:git/sha "c5963264a8da78ece878b04da18225abdbb84457"}}
  :aliases
  {;; offline workspace dev — pin transitive langchain to local checkout
   :dev {:override-deps

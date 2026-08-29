@@ -13,12 +13,65 @@
   <ledger.edn> holds the same shape as `kekkai.store/demo-data`'s :nodes map
   (at minimum {:nodes {\"<id>\" {:status \"authorized\" ...}}})."
   (:require [clojure.edn :as edn]
+            [clojure.string :as str]
+            [kekkai.cacao :as cacao]
+            [kekkai.desired-state :as desired]
+            [kekkai.netmap-distribution :as distribution]
             [kekkai.query :as query]
             [kekkai.store :as store]))
 
-(defn -main [ledger-path node-id]
+(defn- status! [ledger-path node-id]
   (let [data (edn/read-string (slurp ledger-path))
         st (store/->MemStore (atom (merge {:ledger [] :assessments {}} data)))
         status (query/status-of st node-id)]
     (println status)
     (System/exit (if (= "authorized" status) 0 1))))
+
+(defn- roots [csv]
+  (let [values (->> (str/split csv #",") (remove str/blank?) vec)]
+    (when-not (seq values)
+      (throw (ex-info "at least one desired-state root is required"
+                      {:type :kekkai/missing-desired-root})))
+    values))
+
+(defn- publish-netmap!
+  [[netmap-path identity-path roots-csv subject epoch previous-cid min-copies]]
+  (when-not (every? some? [netmap-path identity-path roots-csv subject epoch])
+    (throw (ex-info "usage: netmap-publish NETMAP IDENTITY ROOTS SUBJECT EPOCH [PREVIOUS_CID] [MIN_COPIES]"
+                    {:type :kekkai/invalid-cli-arguments})))
+  (let [identity (cacao/load-or-create-identity! identity-path)
+        mirror-roots (roots roots-csv)
+        result (distribution/publish!
+                {:roots mirror-roots
+                 :min-copies (if min-copies (parse-long min-copies) (count mirror-roots))
+                 :netmap (edn/read-string (slurp netmap-path))
+                 :subject subject
+                 :epoch (parse-long epoch)
+                 :previous-cid (when-not (str/blank? previous-cid) previous-cid)}
+                identity)]
+    (println (pr-str (assoc result :desired/authority-spki-b64
+                           (desired/authority-spki-b64 identity))))))
+
+(defn- pull-netmap!
+  [[roots-csv subject authority min-epoch previous-cid]]
+  (when-not (every? some? [roots-csv subject authority])
+    (throw (ex-info "usage: netmap-pull ROOTS SUBJECT AUTHORITY_SPKI [MIN_EPOCH] [PREVIOUS_CID]"
+                    {:type :kekkai/invalid-cli-arguments})))
+  (let [result (distribution/pull
+                {:roots (roots roots-csv)
+                 :subject subject
+                 :authority-spki-b64 authority
+                 :min-epoch (some-> min-epoch parse-long)
+                 :previous-cid (when-not (str/blank? previous-cid) previous-cid)})]
+    (println (pr-str result))))
+
+(defn -main [& args]
+  (case (first args)
+    "status" (apply status! (rest args))
+    "netmap-publish" (publish-netmap! (rest args))
+    "netmap-pull" (pull-netmap! (rest args))
+    ;; Backward-compatible status form.
+    (if (= 2 (count args))
+      (apply status! args)
+      (throw (ex-info "usage: kekkai.cli [status LEDGER NODE | netmap-publish ... | netmap-pull ...]"
+                      {:type :kekkai/invalid-cli-command :args args})))))
