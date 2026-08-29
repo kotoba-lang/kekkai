@@ -1,0 +1,102 @@
+(ns kekkai.desired-state-test
+  (:require [clojure.test :refer [deftest is]]
+            [kekkai.cacao :as cacao]
+            [kekkai.desired-state :as desired]))
+
+(defn- temp-root []
+  (.toFile (java.nio.file.Files/createTempDirectory
+            "kekkai-desired-"
+            (make-array java.nio.file.attribute.FileAttribute 0))))
+
+(defn- failure-type [f]
+  (try
+    (f)
+    nil
+    (catch clojure.lang.ExceptionInfo e
+      (:type (ex-data e)))))
+
+(deftest canonical-content-addressing
+  (let [id (cacao/generate-identity)
+        input {:kind :kekkai/netmap
+               :subject "tailnet/node-a"
+               :epoch 1
+               :previous-cid nil
+               :payload (array-map :z 1 :a {:right 2 :left 1})}
+        equivalent (assoc input :payload (array-map :a {:left 1 :right 2} :z 1))
+        a (desired/seal input id)
+        b (desired/seal equivalent id)
+        verified (desired/verify a (desired/authority-spki-b64 id))]
+    (is (= (:desired/cid a) (:desired/cid b)))
+    (is (= (:desired/signature-b64 a) (:desired/signature-b64 b)))
+    (is (= (:graph id) (:desired/name verified)))
+    (is (= (:payload input) (:desired/payload verified)))))
+
+(deftest authority-and-integrity-fail-closed
+  (let [id (cacao/generate-identity)
+        other (cacao/generate-identity)
+        env (desired/seal {:kind :kekkai/netmap :subject "n/a" :epoch 1
+                           :previous-cid nil :payload {:ok true}}
+                          id)]
+    (is (= :kekkai/untrusted-desired-signer
+           (failure-type #(desired/verify env (desired/authority-spki-b64 other)))))
+    (is (= :kekkai/desired-cid-mismatch
+           (failure-type #(desired/verify (assoc env :desired/cid "bafkbad")
+                                          (desired/authority-spki-b64 id)))))))
+
+(deftest mirrored-publish-pull-and-rollback-protection
+  (let [id (cacao/generate-identity)
+        authority (desired/authority-spki-b64 id)
+        roots [(temp-root) (temp-root)]
+        env (desired/seal {:kind :kekkai/netmap :subject "tailnet/node-a"
+                           :epoch 1 :previous-cid nil :payload {:peers ["b"]}}
+                          id)
+        published (desired/publish! roots 2 env authority)
+        pulled (desired/pull roots "tailnet/node-a" authority
+                             {:kind :kekkai/netmap})]
+    (is (= 2 (:desired/copies published)))
+    (is (= (:desired/cid env) (:desired/cid pulled)))
+    (is (= {:peers ["b"]} (:desired/payload pulled)))
+    (is (= :kekkai/desired-epoch-rollback
+           (failure-type #(desired/pull roots "tailnet/node-a" authority
+                                        {:min-epoch 2}))))))
+
+(deftest split-brain-is-not-resolved-by-mirror-order
+  (let [id (cacao/generate-identity)
+        authority (desired/authority-spki-b64 id)
+        roots [(temp-root) (temp-root)]
+        mk #(desired/seal {:kind :kekkai/netmap :subject "tailnet/node-a"
+                           :epoch 7 :previous-cid nil :payload {:generation %}}
+                          id)]
+    (desired/publish! [(first roots)] 1 (mk "left") authority)
+    (desired/publish! [(second roots)] 1 (mk "right") authority)
+    (is (= :kekkai/desired-split-brain
+           (failure-type #(desired/pull roots "tailnet/node-a" authority {}))))))
+
+(deftest publisher-does-not-rewind-a-mirror-head
+  (let [id (cacao/generate-identity)
+        authority (desired/authority-spki-b64 id)
+        root (temp-root)
+        mk (fn [epoch payload]
+             (desired/seal {:kind :kekkai/netmap :subject "tailnet/node-a"
+                            :epoch epoch :previous-cid nil :payload payload}
+                           id))]
+    (desired/publish! [root] 1 (mk 2 {:version 2}) authority)
+    (let [failure (try
+                    (desired/publish! [root] 1 (mk 1 {:version 1}) authority)
+                    nil
+                    (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :kekkai/desired-mirror-quorum (:type (ex-data failure))))
+      (is (= :kekkai/desired-head-rollback
+             (-> failure ex-data :results first :error-type))))))
+
+(deftest receipt-is-signed-by-node
+  (let [node (cacao/generate-identity)
+        env (desired/receipt {:node "node-a" :desired-cid "bafkdesired"
+                              :epoch 1 :status :applied
+                              :observed-at "2026-08-29T00:00:00Z"
+                              :detail {:apps ["hello"]}}
+                             node)
+        verified (desired/verify env (desired/authority-spki-b64 node)
+                                 {:kind desired/receipt-kind})]
+    (is (= :applied (get-in verified [:desired/payload :receipt/status])))
+    (is (= "bafkdesired" (get-in verified [:desired/payload :receipt/desired-cid])))))

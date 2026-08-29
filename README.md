@@ -106,6 +106,30 @@ clojure -M:dev:test    # the zero-trust contract + store parity + CACAO crypto
 clojure -M:lint        # clj-kondo (errors fail)
 ```
 
+### Cloudflare を使わない netmap 配布
+
+netmap は単一 URL へ push せず、署名済み desired state として複数の独立 root に
+publish できる。root はローカルディスク、共有ボリューム、object-store mount、別々の
+gateway のどれでもよく、信頼対象ではない。node が固定するのは Ed25519 authority
+だけで、本文は CIDv1、順序は単調増加 epoch、履歴は previous CID で識別する。同じ
+epoch に異なる CID が見えた場合は多数決せず split brain として停止する。
+
+```bash
+# 2 mirror の両方へ発行。初回は identity を生成し、authority SPKI も結果に表示する
+clojure -M -m kekkai.cli netmap-publish netmap.edn .kekkai/authority.edn \
+  /mnt/mirror-a,/mnt/mirror-b tailnet/node-a 1
+
+# node 側: mirror を pull し、authority/CID/signature/epoch を検証してから読む
+clojure -M -m kekkai.cli netmap-pull \
+  /mnt/mirror-a,/mnt/mirror-b tailnet/node-a "$KEKKAI_AUTHORITY_SPKI" 1
+```
+
+mutable head は discovery hint にすぎず、内容の identity ではない。ある mirror が
+停止しても他方から取得でき、古い head への巻き戻しと同 epoch の上書きは発行側でも
+拒否する。この経路は kotobase.net / Cloudflare を必要としない。IPNS 名は authority
+key から導出して envelope に束縛されるが、この slice 自体は public DHT への publish
+を要求しないため、閉域網でも同じ検証契約を使える。
+
 Demo: register a device + heartbeat (observe → datoms) → admit a clean device
 (machine approval → admin approves) → **hold** a rogue device on `:tag-not-owned
 :expired-key` → publish a deny-by-default **netmap** for a laptop → exit-node
@@ -123,6 +147,8 @@ ledger → swaps to DatomicStore with identical results.
 | `src/kekkai/phase.cljc` | **Phase 0→3** — observe-only → assisted → supervised (admission & exit always human) |
 | `src/kekkai/operation.cljc` | **CoordinationActor** — langgraph-clj StateGraph; ingest vs assess flows |
 | `src/kekkai/cacao.clj` | agent-side **CACAO self-mint** (JVM Ed25519 + did:key + CBOR; per-actor node key) |
+| `src/kekkai/desired_state.clj` | authority 署名 + CIDv1 + epoch/previous CID + multi-mirror head + split-brain/rollback 検出 + node receipt |
+| `src/kekkai/netmap_distribution.clj` | wire netmap を共通 desired-state 契約で publish/pull |
 | `src/kekkai/kotoba.clj` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
 | `src/kekkai/sim.cljc` | demo driver |
 | `src/kekkai/query.cljc` | actor 不要の読み取り — `authorized?`（在籍）と `reachable?`（**組織境界込みの**到達可否）は別の問い |
@@ -173,7 +199,7 @@ hold/escalate** する（LLM 不調が「ノード参加」「到達edge」に�
 ## Status
 
 設計実装 + **kotoba-server(kotobase.net) backend 配線**まで完了。runnable +
-**19 tests / 66 assertions / 0 failures**、lint clean。Store は `:db-api` 駆動で
+全テスト / lint clean。Store は `:db-api` 駆動で
 `MemStore ≡ DatomicStore(langchain.db) ≡ kotoba-store(kotobase.net)` が同一契約。
 CACAO 自己発行はオフライン検証済み（did:key `z6Mk…`・graph `k51qzi5uqu5d…`・SIWE
 署名 verify・CBOR map(3)・永続 round-trip）。**live は未確認**: kotobase.net の
