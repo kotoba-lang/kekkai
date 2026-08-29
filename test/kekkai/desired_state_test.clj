@@ -100,3 +100,20 @@
                                  {:kind desired/receipt-kind})]
     (is (= :applied (get-in verified [:desired/payload :receipt/status])))
     (is (= "bafkdesired" (get-in verified [:desired/payload :receipt/desired-cid])))))
+
+(deftest ssh-mirror-roots-refuse-shell-metacharacters-and-parent-traversal
+  (let [id (cacao/generate-identity)
+        authority (desired/authority-spki-b64 id)
+        env (desired/seal {:kind :kekkai/netmap :subject "tailnet/a"
+                           :epoch 1 :previous-cid nil :payload {:ok true}}
+                          id)]
+    (doseq [root ["ssh://node/tmp/../escape"
+                  "ssh://node;touch-pwned/tmp/kekkai"
+                  "ssh://node/tmp/kekkai world"]]
+      (let [failure (try
+                      (desired/publish! [root] 1 env authority)
+                      nil
+                      (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :kekkai/desired-mirror-quorum (:type (ex-data failure))))
+        (is (= :kekkai/invalid-ssh-mirror
+               (-> failure ex-data :results first :error-type)))))))
