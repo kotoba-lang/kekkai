@@ -7,7 +7,7 @@
   equal-epoch disagreement fails closed as split brain."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kekkai.cacao :as cacao]
             [multiformats.core :as mf])
   (:import [java.nio.file Files StandardCopyOption]

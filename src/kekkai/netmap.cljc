@@ -40,7 +40,7 @@
   provably cannot handshake is worse than omitting it and saying so. Carrying
   peered traffic needs the prologue to bind the peering for cross-tailnet
   sessions, which is a data-plane protocol change."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kekkai.acl :as acl]))
 
 (def wire-any

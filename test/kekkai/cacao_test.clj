@@ -7,7 +7,7 @@
   per-actor node-key model is the kekkai/Tailscale analog — the key IS the
   identity."
   (:require [clojure.test :refer [deftest is testing]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kekkai.cacao :as c])
   (:import [java.util Base64]
            [java.security Signature]))
