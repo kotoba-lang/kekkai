@@ -13,7 +13,7 @@
   <ledger.edn> holds the same shape as `kekkai.store/demo-data`'s :nodes map
   (at minimum {:nodes {\"<id>\" {:status \"authorized\" ...}}})."
   (:require [clojure.edn :as edn]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kekkai.cacao :as cacao]
             [kekkai.desired-state :as desired]
             [kekkai.netmap-distribution :as distribution]

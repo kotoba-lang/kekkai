@@ -41,7 +41,7 @@
   §1.13)."
   (:require #?(:clj  [clojure.edn :as edn]
                :cljs [cljs.reader :as edn])
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kekkai.acl :as acl]
             [langchain.db :as d]))
 

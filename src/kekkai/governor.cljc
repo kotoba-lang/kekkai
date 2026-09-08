@@ -136,7 +136,7 @@
        release, witness disputes, AND availability slashing are all
        high-stakes → ALWAYS human. Disputes go further than the others:
        confidence is irrelevant, there is no path to :ok? at all for that op."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kekkai.acl :as acl]
             [kekkai.store :as store]))
 

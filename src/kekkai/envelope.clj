@@ -35,7 +35,7 @@
   other side is handed a form it may not read. `encode-payload` binds the var
   rather than assuming a default, because the default differs between a plain
   run and a REPL — so the bug would appear only when a human published by hand."
-  (:require [clojure.string :as str])
+  (:require [kotoba.lang.text :as str])
   (:import [java.security KeyFactory MessageDigest Signature]
            [java.security.spec X509EncodedKeySpec]
            [java.util Base64]))

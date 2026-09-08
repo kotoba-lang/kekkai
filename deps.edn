@@ -3,7 +3,12 @@
  ;; all .cljc → portable to JVM / SCI / ClojureScript / GraalVM). Same runtime
  ;; robotaxi-actor / vehicle-design-actor / itonami ride on; a tailnet control
  ;; plane is just another sealed-intelligence ⊣ independent-governor StateGraph.
- :deps {io.github.kotoba-lang/langgraph
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       io.github.kotoba-lang/langgraph
         {:git/url "https://github.com/kotoba-lang/langgraph.git"
          :sha "5b4e5e70837b849b14b6a5800894e3be202ad5fa"}
         ;; canonical did:key + IPNS-name derivation (ADR-2607050100) — replaces
