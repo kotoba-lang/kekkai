@@ -10,7 +10,7 @@
     route  r-exit    exit node → high-stakes → admin sign-off
     phase 0          admission in observe-only phase → held (phase-disabled)
 
-  Run: clojure -M:dev:run"
+  Run: kbb -M:dev:run"
   (:require [langgraph.graph :as g]
             [kekkai.store :as store]
             [kekkai.operation :as op]))
