@@ -101,9 +101,9 @@ edge-decision(plane, src, dst)
 ## Run
 
 ```bash
-clojure -M:dev:run     # drive a tailnet: admit / netmap / route through the actor
-clojure -M:dev:test    # the zero-trust contract + store parity + CACAO crypto
-clojure -M:lint        # clj-kondo (errors fail)
+kbb -M:dev:run     # drive a tailnet: admit / netmap / route through the actor
+kbb -M:dev:test    # the zero-trust contract + store parity + CACAO crypto
+kbb -M:lint        # clj-kondo (errors fail)
 ```
 
 ### Cloudflare を使わない netmap 配布
@@ -118,11 +118,11 @@ epoch に異なる CID が見えた場合は多数決せず split brain とし�
 
 ```bash
 # 2 mirror の両方へ発行。初回は identity を生成し、authority SPKI も結果に表示する
-clojure -M -m kekkai.cli netmap-publish netmap.edn .kekkai/authority.edn \
+kbb -M -m kekkai.cli netmap-publish netmap.edn .kekkai/authority.edn \
   /mnt/mirror-a,/mnt/mirror-b tailnet/node-a 1
 
 # node 側: mirror を pull し、authority/CID/signature/epoch を検証してから読む
-clojure -M -m kekkai.cli netmap-pull \
+kbb -M -m kekkai.cli netmap-pull \
   /mnt/mirror-a,/mnt/mirror-b tailnet/node-a "$KEKKAI_AUTHORITY_SPKI" 1
 ```
 
