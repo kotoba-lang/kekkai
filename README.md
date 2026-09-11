@@ -142,18 +142,18 @@ ledger → swaps to DatomicStore with identical results.
 
 | File | Role |
 |---|---|
-| `src/kekkai/store.cljc` | **Store** protocol — `MemStore` ‖ `DatomicStore` (`langchain.db`, swappable to Datomic Local / kotoba-server) + append-only **tailnet genealogy ledger** |
-| `src/kekkai/acl.cljc` | pure **deny-by-default ACL** evaluation (tag ownership · edge grants · reachable peers) + the **organization boundary** (`tailnet-of` · `edge-decision` · peering) — shared by governor & coord-LLM, no I/O |
-| `src/kekkai/coordllm.cljc` | **coord-LLM Advisor** — `mock-advisor` ‖ `llm-advisor` (`langchain.model`); admit / netmap / route proposals |
-| `src/kekkai/governor.cljc` | **TailnetGovernor** — node-key validity · tenancy (owner/tailnet coherence) · tag ownership · deny-by-default · **cross-tailnet** · route-no-hijack (per-tailnet) · peering party-check · no-actuation · high-stakes |
-| `src/kekkai/phase.cljc` | **Phase 0→3** — observe-only → assisted → supervised (admission & exit always human) |
-| `src/kekkai/operation.cljc` | **CoordinationActor** — langgraph-clj StateGraph; ingest vs assess flows |
-| `src/kekkai/cacao.clj` | agent-side **CACAO self-mint** (JVM Ed25519 + did:key + CBOR; per-actor node key) |
-| `src/kekkai/desired_state.clj` | authority 署名 + CIDv1 + epoch/previous CID + multi-mirror head + split-brain/rollback 検出 + node receipt |
-| `src/kekkai/netmap_distribution.clj` | wire netmap を共通 desired-state 契約で publish/pull |
-| `src/kekkai/kotoba.clj` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
-| `src/kekkai/sim.cljc` | demo driver |
-| `src/kekkai/query.cljc` | actor 不要の読み取り — `authorized?`（在籍）と `reachable?`（**組織境界込みの**到達可否）は別の問い |
+| `src/kekkai/store.cljk` | **Store** protocol — `MemStore` ‖ `DatomicStore` (`langchain.db`, swappable to Datomic Local / kotoba-server) + append-only **tailnet genealogy ledger** |
+| `src/kekkai/acl.cljk` | pure **deny-by-default ACL** evaluation (tag ownership · edge grants · reachable peers) + the **organization boundary** (`tailnet-of` · `edge-decision` · peering) — shared by governor & coord-LLM, no I/O |
+| `src/kekkai/coordllm.cljk` | **coord-LLM Advisor** — `mock-advisor` ‖ `llm-advisor` (`langchain.model`); admit / netmap / route proposals |
+| `src/kekkai/governor.cljk` | **TailnetGovernor** — node-key validity · tenancy (owner/tailnet coherence) · tag ownership · deny-by-default · **cross-tailnet** · route-no-hijack (per-tailnet) · peering party-check · no-actuation · high-stakes |
+| `src/kekkai/phase.cljk` | **Phase 0→3** — observe-only → assisted → supervised (admission & exit always human) |
+| `src/kekkai/operation.cljk` | **CoordinationActor** — langgraph-clj StateGraph; ingest vs assess flows |
+| `src/kekkai/cacao.cljk` | agent-side **CACAO self-mint** (JVM Ed25519 + did:key + CBOR; per-actor node key) |
+| `src/kekkai/desired_state.cljk` | authority 署名 + CIDv1 + epoch/previous CID + multi-mirror head + split-brain/rollback 検出 + node receipt |
+| `src/kekkai/netmap_distribution.cljk` | wire netmap を共通 desired-state 契約で publish/pull |
+| `src/kekkai/kotoba.cljk` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
+| `src/kekkai/sim.cljk` | demo driver |
+| `src/kekkai/query.cljk` | actor 不要の読み取り — `authorized?`（在籍）と `reachable?`（**組織境界込みの**到達可否）は別の問い |
 | `test/kekkai/*_test.clj` | zero-trust contract · **組織境界**（`tenant_test.clj`）· store parity (Mem≡Datomic) · CACAO — **95 tests / 272 assertions** |
 
 ## Tailscale → kekkai mapping
