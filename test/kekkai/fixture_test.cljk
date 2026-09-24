@@ -12,7 +12,7 @@
   what the current code emits; the node repository asserts its verifier accepts
   the same file. A change that breaks the boundary fails on one side or the
   other rather than in production."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [clojure.java.io :as io]
             [kotoba.test :refer [deftest is testing]]
             [kekkai.cacao :as cacao]

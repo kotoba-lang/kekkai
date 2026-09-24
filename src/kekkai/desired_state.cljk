@@ -5,7 +5,7 @@
   identity is a CIDv1 of the canonical statement bytes; ordering is a monotonic
   epoch plus the previous CID. Multiple mirrors may carry the same head, while
   equal-epoch disagreement fails closed as split brain."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [clojure.java.io :as io]
             [kotoba.lang.text :as str]
             [kekkai.cacao :as cacao]

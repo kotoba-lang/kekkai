@@ -39,7 +39,7 @@
   :user/activity namespace** — the control plane authorizes reachability, it
   never logs what flows through the tunnels (anti-surveillance, Wellbecoming
   §1.13)."
-  (:require #?(:clj  [clojure.edn :as edn]
+  (:require #?(:clj  [kotoba.lang.edn :as edn]
                :cljs [cljs.reader :as edn])
             [kotoba.lang.text :as str]
             [kekkai.acl :as acl]
