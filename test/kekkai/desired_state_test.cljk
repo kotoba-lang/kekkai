@@ -1,12 +1,11 @@
 (ns kekkai.desired-state-test
-  (:require [kotoba.test :refer [deftest is]]
+  (:require [kotoba.io :as kio] [kotoba.test :refer [deftest is]]
             [kekkai.cacao :as cacao]
             [kekkai.desired-state :as desired]))
 
 (defn- temp-root []
-  (.toFile (java.nio.file.Files/createTempDirectory
-            "kekkai-desired-"
-            (make-array java.nio.file.attribute.FileAttribute 0))))
+  (kio/temp-dir
+            "kekkai-desired-"))
 
 (defn- failure-type [f]
   (try

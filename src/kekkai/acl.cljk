@@ -38,7 +38,7 @@
   open a path into another, and the grants that cross the boundary are not
   buried inside either org's internal policy where the other side cannot read
   them."
-  (:require [clojure.set :as set]))
+  (:require [kotoba.lang.coll :as set]))
 
 (def default-tailnet
   "The tailnet a node with no explicit `:tailnet` belongs to.
