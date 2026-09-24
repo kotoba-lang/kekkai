@@ -11,7 +11,7 @@
   through request->record/commit-effects! and a :treasury store :kind is a
   further integration step, not done in this session (see this PR's
   description)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kekkai.governor :as governor]
             [kekkai.store :as store]))
 

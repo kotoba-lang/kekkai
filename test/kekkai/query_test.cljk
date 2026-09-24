@@ -1,5 +1,5 @@
 (ns kekkai.query-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kekkai.query :as query]
             [kekkai.store :as store]))
 

@@ -6,7 +6,7 @@
   private subnet two organizations both use, an approval one organization
   wrote down on the other's behalf. The boundary is only worth having if it
   holds in exactly those cases, so they are the cases pinned here."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kekkai.acl :as acl]
             [kekkai.coordllm :as coordllm]
             [kekkai.governor :as gov]

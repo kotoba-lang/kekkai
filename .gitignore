@@ -2,3 +2,4 @@
 /target/
 /.clj-kondo/.cache/
 /.kekkai/
+.nbb/

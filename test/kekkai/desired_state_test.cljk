@@ -1,5 +1,5 @@
 (ns kekkai.desired-state-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kekkai.cacao :as cacao]
             [kekkai.desired-state :as desired]))
 

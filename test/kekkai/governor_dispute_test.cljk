@@ -9,7 +9,7 @@
   Scoped to `governor/check`/`hold-fact` directly (unit-level), same
   scope discipline as governor_treasury_test.clj -- full StateGraph
   wiring is a further integration step, not done in this session."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kekkai.governor :as governor]
             [kekkai.store :as store]))
 
