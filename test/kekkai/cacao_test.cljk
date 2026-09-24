@@ -6,7 +6,7 @@
   signature over the exact SIWE message, and a well-formed CBOR envelope. The
   per-actor node-key model is the kekkai/Tailscale analog — the key IS the
   identity."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.text :as str]
             [kekkai.cacao :as c])
   (:import [java.util Base64]

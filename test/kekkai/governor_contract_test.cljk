@@ -4,7 +4,7 @@
   / admits a device / approves a route the TailnetGovernor would reject, never
   auto-admits a machine, never actuates the data plane, and always records
   observations."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [kekkai.store :as store]
             [kekkai.coordllm :as coordllm]

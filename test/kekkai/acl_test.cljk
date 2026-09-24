@@ -6,7 +6,7 @@
   core of the whole system (deny-by-default, no implicit allow) so it
   deserves tests that pin its behavior independent of the governor
   layer built on top of it."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kekkai.acl :as acl]))
 
 ;; ── principals ──────────────────────────────────────────────────────────

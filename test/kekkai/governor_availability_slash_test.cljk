@@ -15,7 +15,7 @@
   discipline as governor_treasury_test.clj/governor_dispute_test.clj --
   full StateGraph wiring is a further integration step, not done in this
   session."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kekkai.governor :as governor]
             [kekkai.store :as store]))
 

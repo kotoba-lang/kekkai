@@ -2,7 +2,7 @@
   "The signing half of the netmap boundary — including the properties the
   ClojureScript verifier on the other side depends on but cannot assert here."
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [kekkai.cacao :as cacao]
             [kekkai.envelope :as env]
             [kekkai.netmap :as nm]

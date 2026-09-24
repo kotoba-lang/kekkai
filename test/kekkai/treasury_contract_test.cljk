@@ -9,7 +9,7 @@
   hold-fact for a rejected verdict actually lands in the ledger through
   the :hold node's :t filter (3) :treasury/release is NOT gated by the
   tailnet rollout phase, unlike :node/admit."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [kekkai.store :as store]
             [kekkai.operation :as op]))

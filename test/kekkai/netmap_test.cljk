@@ -1,6 +1,6 @@
 (ns kekkai.netmap-test
   "The wire netmap projection: what the data plane is told, and what it is not."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kekkai.netmap :as nm]
             [kekkai.store :as store]))
 
