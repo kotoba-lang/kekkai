@@ -1,13 +1,12 @@
 (ns kekkai.envelope-test
   "The signing half of the netmap boundary — including the properties the
   ClojureScript verifier on the other side depends on but cannot assert here."
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [kekkai.cacao :as cacao]
             [kekkai.envelope :as env]
             [kekkai.netmap :as nm]
-            [kekkai.store :as store])
-  (:import [java.util Base64]))
+            [kekkai.store :as store]))
 
 (def demo (store/demo-data))
 
@@ -20,8 +19,7 @@
    :version 42})
 
 (defn- payload-text [envelope]
-  (String. (.decode (Base64/getDecoder) ^String (:netmap/payload-b64 envelope))
-           "UTF-8"))
+  (kbytes/utf8-string (kbytes/base64-decode-bytes ^String (:netmap/payload-b64 envelope))))
 
 (deftest round-trips-through-its-own-verifier
   (let [id (cacao/generate-identity)
@@ -74,7 +72,7 @@
         ;; alone would pass this, which is the whole reason both are checked.
         forged (let [payload (env/encode-payload tampered)]
                  (assoc honest
-                        :netmap/payload-b64 (.encodeToString (Base64/getEncoder) payload)
+                        :netmap/payload-b64 (kbytes/base64-encode payload)
                         :netmap/sha256 (:netmap/sha256 (env/seal tampered id))))]
     (is (thrown? clojure.lang.ExceptionInfo
                  (env/verify forged (env/authority-spki-b64 id))))))

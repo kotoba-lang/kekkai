@@ -35,16 +35,15 @@
   other side is handed a form it may not read. `encode-payload` binds the var
   rather than assuming a default, because the default differs between a plain
   run and a REPL — so the bug would appear only when a human published by hand."
-  (:require [kotoba.lang.text :as str])
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str])
   (:import [java.security KeyFactory MessageDigest Signature]
-           [java.security.spec X509EncodedKeySpec]
-           [java.util Base64]))
+           [java.security.spec X509EncodedKeySpec]))
 
 (defn- b64-encode ^String [^bytes bs]
-  (.encodeToString (Base64/getEncoder) bs))
+  (kbytes/base64-encode bs))
 
 (defn- b64-decode ^bytes [^String s]
-  (.decode (Base64/getDecoder) s))
+  (kbytes/base64-decode-bytes s))
 
 (defn- sha256-hex ^String [^bytes bs]
   (->> (.digest (MessageDigest/getInstance "SHA-256") bs)
@@ -58,7 +57,7 @@
   (binding [*print-namespace-maps* false
             *print-length* nil
             *print-level* nil]
-    (.getBytes (pr-str netmap) "UTF-8")))
+    (kbytes/utf8-bytes (pr-str netmap))))
 
 (defn seal
   "Sign `netmap` with `identity` (a `kekkai.cacao` identity map) and return the
@@ -127,4 +126,4 @@
         (when-not ok?
           (throw (ex-info "netmap signature verification failed"
                           {:type :kekkai/netmap-signature-invalid})))
-        (read-string (String. payload "UTF-8"))))))
+        (read-string (kbytes/utf8-string payload))))))

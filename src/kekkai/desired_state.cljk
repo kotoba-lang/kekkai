@@ -5,7 +5,7 @@
   identity is a CIDv1 of the canonical statement bytes; ordering is a monotonic
   epoch plus the previous CID. Multiple mirrors may carry the same head, while
   equal-epoch disagreement fails closed as split brain."
-  (:require [kotoba.lang.edn :as edn]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn]
             [clojure.java.io :as io]
             [kotoba.lang.text :as str]
             [kekkai.cacao :as cacao]
@@ -13,7 +13,7 @@
   (:import [java.nio.file Files StandardCopyOption]
            [java.security KeyFactory Signature]
            [java.security.spec X509EncodedKeySpec]
-           [java.util Base64 UUID]))
+           [java.util UUID]))
 
 (def schema "kekkai.desired-state/v1")
 (def receipt-kind :kekkai/receipt)
@@ -39,13 +39,13 @@
   (binding [*print-namespace-maps* false
             *print-length* nil
             *print-level* nil]
-    (.getBytes (pr-str (canonical-value value)) "UTF-8")))
+    (kbytes/utf8-bytes (pr-str (canonical-value value)))))
 
 (defn- b64 [^bytes bs]
-  (.encodeToString (Base64/getEncoder) bs))
+  (kbytes/base64-encode bs))
 
 (defn- unb64 ^bytes [s]
-  (.decode (Base64/getDecoder) ^String s))
+  (kbytes/base64-decode-bytes ^String s))
 
 (defn- public-key [spki]
   (.generatePublic (KeyFactory/getInstance "Ed25519")
@@ -123,9 +123,9 @@
        (when-not (verify-signature? pub bytes signature-b64)
          (throw (ex-info "desired state signature invalid"
                          {:type :kekkai/desired-signature-invalid})))
-       (let [stmt (edn/read-string (String. bytes "UTF-8"))
+       (let [stmt (edn/read-string (kbytes/utf8-string bytes))
              payload-bytes (unb64 (:desired/payload-b64 stmt))
-             payload (edn/read-string (String. payload-bytes "UTF-8"))]
+             payload (edn/read-string (kbytes/utf8-string payload-bytes))]
          (when-not (= schema (:desired/schema stmt))
            (throw (ex-info "desired state schema mismatch"
                            {:type :kekkai/desired-schema-mismatch})))
@@ -154,7 +154,7 @@
   (b64 (.getEncoded (:public-key identity))))
 
 (defn subject-key [subject]
-  (mf/cidv1-raw (.getBytes ^String subject "UTF-8")))
+  (mf/cidv1-raw (kbytes/utf8-bytes ^String subject)))
 
 (defn block-file [root cid]
   (io/file root "blocks" (str cid ".edn")))
@@ -182,7 +182,7 @@
   (let [process (.start (ProcessBuilder. ^java.util.List ["ssh" host command]))]
     (when (some? input)
       (with-open [out (.getOutputStream process)]
-        (.write out (.getBytes ^String input "UTF-8"))))
+        (.write out (kbytes/utf8-bytes ^String input))))
     (let [stdout (slurp (.getInputStream process))
           stderr (slurp (.getErrorStream process))
           exit (.waitFor process)]
@@ -222,7 +222,7 @@
                                 [StandardCopyOption/REPLACE_EXISTING]))))))
 
 (defn envelope-string [envelope]
-  (String. (canonical-bytes envelope) "UTF-8"))
+  (kbytes/utf8-string (canonical-bytes envelope)))
 
 (defn- current-head [root subject]
   (try
@@ -269,7 +269,7 @@
                           (write-root! root (relative-block (:desired/cid verified))
                                        (envelope-string envelope))
                           (write-root! root (relative-head (:desired/subject verified))
-                                       (String. (canonical-bytes head) "UTF-8"))
+                                       (kbytes/utf8-string (canonical-bytes head)))
                           {:root root :ok? true}
                           (catch Exception e
                             {:root root :ok? false :error (.getMessage e)
