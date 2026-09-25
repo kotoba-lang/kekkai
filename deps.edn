@@ -4,6 +4,9 @@
  ;; robotaxi-actor / vehicle-design-actor / itonami ride on; a tailnet control
  ;; plane is just another sealed-intelligence ⊣ independent-governor StateGraph.
  :deps {
+        ;; kotoba.lang.error replaced clojure.lang.ExceptionInfo here (2026-09-25).
+        ;; An explicit floor: tools.deps takes the NEWEST sha it is shown.
+        io.github.kotoba-lang/error {:git/sha "838dec56c9a5b74f9eec825a2fb28bda157f8cd3"}
         ;; kotoba.bytes replaced java.util.Base64 here (2026-09-24). An explicit
         ;; floor: tools.deps takes the NEWEST sha it is shown.
         io.github.kotoba-lang/bytes {:git/sha "d5259f35ab7c4f5a66e63ca29ed4dcf7ba3f1ac5"}
@@ -11,7 +14,7 @@
         ;; An explicit floor: the java.io.File method functions (exists?, file?,
         ;; parent-file, canonical-path, mkdirs, list-files ...) are in kotoba.io
         ;; from this sha, and tools.deps takes the NEWEST sha it is shown.
-        io.github.kotoba-lang/io {:git/sha "1b60ca825c1e705bd195f857ca4549133653a9f3"}
+        io.github.kotoba-lang/io {:git/sha "72dde04b4c32854d70d17a670b277f8f7957a784"}
         ;; kotoba.lang.coll replaced clojure.set here (2026-09-24). An explicit
         ;; floor: kotoba.lang.coll carries clojure.set's union/intersection/
         ;; difference/map-invert from 0ffd5f6, and tools.deps takes the NEWEST
