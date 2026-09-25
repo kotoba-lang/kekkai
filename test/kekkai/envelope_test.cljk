@@ -1,7 +1,7 @@
 (ns kekkai.envelope-test
   "The signing half of the netmap boundary — including the properties the
   ClojureScript verifier on the other side depends on but cannot assert here."
-  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [kekkai.cacao :as cacao]
             [kekkai.envelope :as env]
@@ -55,12 +55,12 @@
         other (cacao/generate-identity)
         envelope (env/seal (nm/publish inputs "n-laptop") signer)]
     (testing "the node's configured authority is what decides, not the envelope"
-      (is (thrown? clojure.lang.ExceptionInfo
+      (is (thrown? kerror/ExceptionInfo
                    (env/verify envelope (env/authority-spki-b64 other)))))
     (testing "and an envelope cannot promote its own signer"
       (let [forged (assoc envelope :netmap/signer-spki-b64
                           (env/authority-spki-b64 other))]
-        (is (thrown? clojure.lang.ExceptionInfo
+        (is (thrown? kerror/ExceptionInfo
                      (env/verify forged (env/authority-spki-b64 other))))))))
 
 (deftest a-tampered-payload-is-rejected-even-with-a-matching-digest
@@ -74,14 +74,14 @@
                  (assoc honest
                         :netmap/payload-b64 (kbytes/base64-encode payload)
                         :netmap/sha256 (:netmap/sha256 (env/seal tampered id))))]
-    (is (thrown? clojure.lang.ExceptionInfo
+    (is (thrown? kerror/ExceptionInfo
                  (env/verify forged (env/authority-spki-b64 id))))))
 
 (deftest a-payload-that-does-not-match-its-digest-is-rejected
   (let [id (cacao/generate-identity)
         envelope (env/seal (nm/publish inputs "n-laptop") id)
         forged (assoc envelope :netmap/sha256 (str/reverse (:netmap/sha256 envelope)))]
-    (is (thrown? clojure.lang.ExceptionInfo
+    (is (thrown? kerror/ExceptionInfo
                  (env/verify forged (env/authority-spki-b64 id))))))
 
 (deftest an-incomplete-envelope-is-rejected-before-any-crypto
@@ -89,13 +89,13 @@
         envelope (env/seal (nm/publish inputs "n-laptop") id)]
     (doseq [k [:netmap/payload-b64 :netmap/signature-b64
                :netmap/signer-spki-b64 :netmap/sha256]]
-      (is (thrown? clojure.lang.ExceptionInfo
+      (is (thrown? kerror/ExceptionInfo
                    (env/verify (dissoc envelope k) (env/authority-spki-b64 id)))
           (str "missing " k)))))
 
 (deftest signing-without-an-identity-is-refused
-  (is (thrown? clojure.lang.ExceptionInfo
+  (is (thrown? kerror/ExceptionInfo
                (env/seal (nm/publish inputs "n-laptop") {})))
-  (is (thrown? clojure.lang.ExceptionInfo
+  (is (thrown? kerror/ExceptionInfo
                (env/seal (nm/publish inputs "n-laptop")
                          (dissoc (cacao/generate-identity) :private-key)))))

@@ -13,7 +13,7 @@
   the same file. A change that breaks the boundary fails on one side or the
   other rather than in production."
   (:require [kotoba.lang.edn :as edn]
-            [clojure.java.io :as io]
+            [kotoba.io :as io]
             [kotoba.test :refer [deftest is testing]]
             [kekkai.cacao :as cacao]
             [kekkai.envelope :as env]

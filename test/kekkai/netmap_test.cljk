@@ -1,6 +1,6 @@
 (ns kekkai.netmap-test
   "The wire netmap projection: what the data plane is told, and what it is not."
-  (:require [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
             [kekkai.netmap :as nm]
             [kekkai.store :as store]))
 
@@ -127,7 +127,7 @@
     (let [nodes (mapv #(if (= "n-server" (:id %)) (dissoc % :static-pub) %)
                       (vals (:nodes demo)))
           ex (try (nm/publish (inputs {:nodes nodes}) "n-laptop") nil
-                  (catch clojure.lang.ExceptionInfo e e))]
+                  (catch kerror/ExceptionInfo e e))]
       (is (some? ex))
       (is (= :kekkai/unpublishable-nodes (:type (ex-data ex))))
       (is (= [{:problem :missing-static-pub :node "n-server"}]
@@ -141,9 +141,9 @@
       (is (some? (nm/publish (inputs {:nodes nodes}) "n-laptop"))))))
 
 (deftest version-and-node-identity-are-not-guessed
-  (is (thrown? clojure.lang.ExceptionInfo (nm/publish (inputs) "no-such-node")))
-  (is (thrown? clojure.lang.ExceptionInfo (nm/publish (inputs {:version nil}) "n-laptop")))
-  (is (thrown? clojure.lang.ExceptionInfo (nm/publish (inputs {:version "42"}) "n-laptop"))))
+  (is (thrown? kerror/ExceptionInfo (nm/publish (inputs) "no-such-node")))
+  (is (thrown? kerror/ExceptionInfo (nm/publish (inputs {:version nil}) "n-laptop")))
+  (is (thrown? kerror/ExceptionInfo (nm/publish (inputs {:version "42"}) "n-laptop"))))
 
 (deftest the-projection-does-not-depend-on-input-order
   (testing "the netmap is signed as bytes, so ordering is part of the signature:

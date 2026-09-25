@@ -1,5 +1,5 @@
 (ns kekkai.desired-state-test
-  (:require [kotoba.io :as kio] [kotoba.test :refer [deftest is]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.io :as kio] [kotoba.test :refer [deftest is]]
             [kekkai.cacao :as cacao]
             [kekkai.desired-state :as desired]))
 
@@ -11,7 +11,7 @@
   (try
     (f)
     nil
-    (catch clojure.lang.ExceptionInfo e
+    (catch kerror/ExceptionInfo e
       (:type (ex-data e)))))
 
 (deftest canonical-content-addressing
@@ -83,7 +83,7 @@
     (let [failure (try
                     (desired/publish! [root] 1 (mk 1 {:version 1}) authority)
                     nil
-                    (catch clojure.lang.ExceptionInfo e e))]
+                    (catch kerror/ExceptionInfo e e))]
       (is (= :kekkai/desired-mirror-quorum (:type (ex-data failure))))
       (is (= :kekkai/desired-head-rollback
              (-> failure ex-data :results first :error-type))))))
@@ -112,7 +112,7 @@
       (let [failure (try
                       (desired/publish! [root] 1 env authority)
                       nil
-                      (catch clojure.lang.ExceptionInfo e e))]
+                      (catch kerror/ExceptionInfo e e))]
         (is (= :kekkai/desired-mirror-quorum (:type (ex-data failure))))
         (is (= :kekkai/invalid-ssh-mirror
                (-> failure ex-data :results first :error-type)))))))
