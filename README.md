@@ -19,7 +19,8 @@ Here it is **coord-LLM ⊣ TailnetGovernor**.
 
 > Charter: **(G1)** coordinate → publish-netmap only, no data-plane actuation —
 > the actor proposes reachability, the nodes apply it; **(G2)** machine
-> approval and exit-node approval are **always a human call** (high-stakes);
+> approval, exit-node approval and **funnel exposure** are **always a human
+> call** (high-stakes);
 > **(G3)** kotoba-native — node/key/ACL/route facts are durable EAVT ground
 > datoms, decisions are transient until committed; **(G4)** anti-surveillance —
 > there is **no `:traffic/*` or `:user/activity` namespace**: the control plane
@@ -98,6 +99,72 @@ edge-decision(plane, src, dst)
 | `:peering/propose` | 越境 peering を提案（`:approved-by` は空で記録される——提案者が相手の同意を書けない） |
 | `:peering/approve` | **1組織分**の同意を追加。常に人間承認、両者揃って初めて有効 |
 
+## kekkai funnel — 公開 ingress（Tailscale Funnel 相当）
+
+NAT 内の fleet ノード上のサービスを、Cloudflare も Tailscale も使わずに**インター
+ネットへ公開する**ための制御面。初用途は fleet ノード `gad` の Biscuit-gated block
+service を公開ホスト名で出すこと。
+
+```
+internet ──TLS/TCP──▶ edge-1 (tag:funnel-edge, 公開 listener)
+                          │  overlay (Noise), capability :funnel, port 8080 のみ
+                          ▼
+                        gad : block-node:8080   (NAT 内、inbound 不要)
+```
+
+funnel は**トンネルではなく grant**。「公開 DNS 名 `host` には `edge` が応答してよく、
+`edge` はその接続を overlay 越しに `node` の `service`:`port` へ運んでよい」という
+承認済みレコードで、制御面はそれを記録し netmap に載せるだけ。
+
+| op | 何をするか |
+|---|---|
+| `:funnel/expose` | `{:node :edge :host :service :port}` を公開する。**常に人間承認**（exit node と同じ class — tailnet の片側が「インターネット全体」になる唯一の grant）。phase 0 では無効 |
+| `:funnel/withdraw` | `{:host}` の公開を取り下げる。high-stakes ではない（到達性を狭めるだけ）。**鍵チェックをしない** — 鍵が漏れた/失効したノードの公開こそ即座に閉じたいので。全 phase で有効、phase 2+ で auto-commit |
+
+TailnetGovernor の HARD 不変条件（人間でも越えられない hold）:
+
+- target / edge ともに有効な鍵・`authorized`・active な tailnet 所属
+- edge は `tag:funnel-edge` を持ち、**edge 自身の tailnet の `:tag-owners` がその所有者に認可している**
+  （所有されない自己主張 tag は hold — 既存の tag-ownership モデルそのまま）
+- edge と target が同じ tailnet（`:cross-tailnet`。peering は「他組織の edge にインターネットを
+  転送されること」への同意ではない）
+- host は正規の小文字 DNS 名（IP リテラル・wildcard・port・末尾ドット・大文字は拒否）
+- host が**別の** active funnel に束縛済みでない（公開 DNS 名は global に一意なので、
+  route hijack と違い plane 全体で判定。拒否理由に保持者は出さない）
+- port 1–65535、service 名あり、advisor が funnel を書き換えていない、effect は `:funnel-record`
+
+**local funnel と remote funnel**（owner 決定 2026-09-29「エッジ自身のサービスは直接配信にして」）:
+
+| | remote funnel（edge ≠ node） | local funnel（edge = node） |
+|---|---|---|
+| 配信 | edge の公開 listener → overlay → NAT 内 target | ノード自身の公開 listener から直接配信、overlay を通らない |
+| netmap | edge と target の両方に `:netmap/funnels` + `:funnel` edge + 相互 peer | そのノードの netmap にだけ `:netmap/funnels`（edge = node = self）。**edge も peer も足さない** — 誰にも到達性を与えない |
+| governor | 上記すべて | 同じ（常に人間承認、`tag:funnel-edge` の所有も必要 — そのノードが edge だから）。組織境界は自明に満たす |
+
+`gad` の配備がちょうど両方: `gad` は IPv6 で公開到達可能なので自分の `block-node` を
+local funnel として直接配信し、同時に NAT 内の fleet ノードに対する remote funnel の edge
+になる。
+
+承認は提案時だけでなく**人間の sign-off 時にも再検閲**する（同じ host への 2 つの要求が
+両方 clean で escalate され、2 つ目の承認が公開名を黙って付け替える経路を塞ぐ）。
+
+**wire netmap（kekkai-node との契約）**: `kekkai.netmap/publish` は、その funnel の
+`:funnel/edge` または `:funnel/node` であるノードの netmap にだけ、空でない場合に限り
+`:netmap/funnels`（`:funnel/host` 順）を最後のキーとして載せ、`{:edge/from edge
+:edge/to node :edge/capabilities [:funnel] :edge/ports [port]}` を `:netmap/edges` に
+**別エントリとして**加える（ACL edge に畳み込むと port が capability 間で混ざるため）。
+edge と target は互いの peer として載る。funnel に関係しないノードの netmap は
+**バイト単位で以前と同一**（署名 fixture でテスト固定）。`:funnel` は `:private-http`
+とは別の capability。
+
+**charter との関係**:
+- **G1** — 依然として制御面のみ。actor は listener を開かず、DNS も書かず、パケットも
+  運ばない。edge ノード（`kekkai-node`）が netmap を読んで listener を開く。
+- **G2** — 公開は常に人間の判断。
+- **G4** — funnel grant は**到達性を認可するだけで、リクエストを一切記録しない**。
+  レコードと台帳にあるのは host/edge/node/service/port と承認者だけで、クライアント
+  アドレス・リクエストログ・ヒット数を入れる field がそもそも存在しない。
+
 ## Run
 
 ```bash
@@ -145,7 +212,8 @@ ledger → swaps to DatomicStore with identical results.
 | `src/kekkai/store.cljk` | **Store** protocol — `MemStore` ‖ `DatomicStore` (`langchain.db`, swappable to Datomic Local / kotoba-server) + append-only **tailnet genealogy ledger** |
 | `src/kekkai/acl.cljk` | pure **deny-by-default ACL** evaluation (tag ownership · edge grants · reachable peers) + the **organization boundary** (`tailnet-of` · `edge-decision` · peering) — shared by governor & coord-LLM, no I/O |
 | `src/kekkai/coordllm.cljk` | **coord-LLM Advisor** — `mock-advisor` ‖ `llm-advisor` (`langchain.model`); admit / netmap / route proposals |
-| `src/kekkai/governor.cljk` | **TailnetGovernor** — node-key validity · tenancy (owner/tailnet coherence) · tag ownership · deny-by-default · **cross-tailnet** · route-no-hijack (per-tailnet) · peering party-check · no-actuation · high-stakes |
+| `src/kekkai/governor.cljk` | **TailnetGovernor** — node-key validity · tenancy (owner/tailnet coherence) · tag ownership · deny-by-default · **cross-tailnet** · route-no-hijack (per-tailnet) · peering party-check · **funnel invariants** · no-actuation · high-stakes |
+| `src/kekkai/funnel.cljk` | **kekkai funnel** の純粋定義 — `tag:funnel-edge` · `:funnel` capability · 公開ホスト名の検証 · request からの spec 抽出 |
 | `src/kekkai/phase.cljk` | **Phase 0→3** — observe-only → assisted → supervised (admission & exit always human) |
 | `src/kekkai/operation.cljk` | **CoordinationActor** — langgraph-clj StateGraph; ingest vs assess flows |
 | `src/kekkai/cacao.cljk` | agent-side **CACAO self-mint** (JVM Ed25519 + did:key + CBOR; per-actor node key) |
@@ -154,7 +222,7 @@ ledger → swaps to DatomicStore with identical results.
 | `src/kekkai/kotoba.cljk` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
 | `src/kekkai/sim.cljk` | demo driver |
 | `src/kekkai/query.cljk` | actor 不要の読み取り — `authorized?`（在籍）と `reachable?`（**組織境界込みの**到達可否）は別の問い |
-| `test/kekkai/*_test.clj` | zero-trust contract · **組織境界**（`tenant_test.clj`）· store parity (Mem≡Datomic) · CACAO — **95 tests / 272 assertions** |
+| `test/kekkai/*_test.cljk` | zero-trust contract · **組織境界**（`tenant_test`）· **funnel**（`funnel_test`）· store parity (Mem≡Datomic) · CACAO — kbb で **147 tests / 536 assertions**（`desired_state_test` は JVM 専用: `ProcessBuilder`/`java.nio` を使うため kbb engine では読み込めない） |
 
 ## Tailscale → kekkai mapping
 
@@ -168,6 +236,7 @@ ledger → swaps to DatomicStore with identical results.
 | node sharing between tailnets | `:peering` — 両組織の承認が要る directional grant（Tailscale の共有より明示的） |
 | netmap (peer map a node receives) | `:access/assess` → committed netmap assessment |
 | subnet routes / exit nodes | `:route/advertise` (observe) → `:route/approve` (exit = human) |
+| Funnel (public ingress) | `:funnel/expose` (always human) / `:funnel/withdraw` → `:netmap/funnels` + `:funnel` edge, edge ノードは `tag:funnel-edge` |
 | `tailscale up` actuating WireGuard | **out of scope by charter** — the node does this, not the actor: [`kekkai-node`](https://github.com/kotoba-lang/kekkai-node) |
 | auth keys / SSO-issued tokens | **none** — the actor self-mints CACAO from its own key |
 

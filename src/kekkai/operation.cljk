@@ -20,7 +20,9 @@
     (it publishes a netmap; the nodes open their own WireGuard tunnels)."
   (:require [langgraph.graph :as g]
             [langgraph.checkpoint :as cp]
+            [kekkai.acl :as acl]
             [kekkai.coordllm :as coordllm]
+            [kekkai.funnel :as funnel]
             [kekkai.governor :as gov]
             [kekkai.phase :as phase]
             [kekkai.store :as store]))
@@ -74,6 +76,46 @@
                      :peers (:peers proposal) :route (:route proposal)}
               approval (assoc :approved-by (:by approval))
               (not approval) (assoc :by :auto))}))
+
+(def ^:private funnel-ops #{:funnel/expose :funnel/withdraw})
+
+(defn- funnel-commit-record
+  "The funnel write for a committed `:funnel/expose` / `:funnel/withdraw`, or
+  nil for every other op.
+
+  Funnels get their own record rather than riding the `:assessment` bucket the
+  way `:treasury/release` does: an assessment is keyed by the subject node, so
+  exposing a service on `gad` would overwrite `gad`'s committed netmap
+  assessment with a funnel. A funnel is keyed by its public host instead.
+
+  The record is built from the REQUEST's spec (`kekkai.funnel/spec`) — the one
+  the governor checked — never from the proposal. Withdrawal rewrites the whole
+  record with status \"withdrawn\" (the store replaces funnels), so the
+  genealogy keeps what was public and the netmap projector drops it."
+  [st {:keys [op host] :as request} approval]
+  (case op
+    :funnel/expose
+    {:kind :funnel :id host
+     :value (cond-> (assoc (funnel/spec request)
+                           :tailnet (acl/tailnet-of (store/node st (:node request)))
+                           :status "active")
+              approval (assoc :approved-by (:by approval))
+              (not approval) (assoc :by :auto))}
+    :funnel/withdraw
+    (when-let [f (store/active-funnel-for-host st host)]
+      {:kind :funnel :id host
+       :value (cond-> (assoc f :status "withdrawn")
+                approval (assoc :withdrawn-by (:by approval))
+                (not approval) (assoc :withdrawn-by :auto))})
+    nil))
+
+(defn- record-for
+  "The commit-time record for any assess op: a funnel record for funnel ops,
+  the assessment record otherwise."
+  [st request proposal & [approval]]
+  (if (contains? funnel-ops (:op request))
+    (funnel-commit-record st request approval)
+    (commit-record (:op request) (subject request) proposal approval)))
 
 (defn- commit-effects!
   "Apply the op-specific control-plane write on commit. Admission flips the
@@ -165,21 +207,37 @@
                         :phase ph :confidence (:confidence verdict)}]}
               :commit
               {:disposition :commit
-               :record (commit-record (:op request) (subject request) proposal)}))))
+               :record (record-for store request proposal)}))))
 
       (g/add-node :request-approval
         (fn [{:keys [request proposal approval verdict]}]
-          (if (= :approved (:status approval))
-            {:disposition :commit
-             :record (commit-record (:op request) (subject request) proposal approval)
-             :audit [{:t :admin-signoff :op (:op request)
-                      :node (subject request) :by (:by approval)
-                      :recommendation (:recommendation proposal)}]}
-            {:disposition :hold
-             :audit [(merge (gov/hold-fact request
-                                           (assoc verdict :violations
-                                                  [{:rule :admin-rejected}]))
-                            {:t :signoff-rejected})]})))
+          ;; A funnel is re-censored at sign-off, not only at proposal time.
+          ;; The human decides minutes or days after the governor did, and in
+          ;; between a second exposure of the same host can have been approved
+          ;; — two requests that were each clean when proposed would otherwise
+          ;; both commit, and the second would silently re-point a public name.
+          ;; A hard violation found now holds exactly as it would have then;
+          ;; the approval cannot carry it past.
+          (let [recheck (when (contains? funnel-ops (:op request))
+                          (gov/check request proposal store))]
+            (cond
+              (:hard? recheck)
+              {:disposition :hold
+               :audit [(assoc (gov/hold-fact request recheck) :at :signoff)]}
+
+              (= :approved (:status approval))
+              {:disposition :commit
+               :record (record-for store request proposal approval)
+               :audit [{:t :admin-signoff :op (:op request)
+                        :node (subject request) :by (:by approval)
+                        :recommendation (:recommendation proposal)}]}
+
+              :else
+              {:disposition :hold
+               :audit [(merge (gov/hold-fact request
+                                             (assoc verdict :violations
+                                                    [{:rule :admin-rejected}]))
+                              {:t :signoff-rejected})]}))))
 
       ;; commit an assessment datom + op-specific control-plane write + ledger.
       (g/add-node :commit
@@ -188,8 +246,11 @@
           (commit-effects! store request)
           (let [basis (or (get-in record [:value :recommendation])
                           (get-in record [:value :status]))
-                f {:t :committed :op (:op request) :subject (subject request)
-                   :disposition :commit :basis basis}]
+                f (cond-> {:t :committed :op (:op request) :subject (subject request)
+                           :disposition :commit :basis basis}
+                    ;; a funnel's genealogy names the public host it bound or
+                    ;; released — the grant, never the traffic (G4).
+                    (:host request) (assoc :host (:host request)))]
             (store/append-ledger! store f)
             {:audit [f]})))
 
@@ -201,7 +262,7 @@
           ;; hold fact actually reaches the ledger instead of being
           ;; silently dropped by this filter.
           (when-let [hf (last (filter #(#{:tailnet-hold :treasury-hold :witness-dispute-hold
-                                          :signoff-rejected} (:t %)) audit))]
+                                          :funnel-hold :signoff-rejected} (:t %)) audit))]
             (store/append-ledger! store (assoc hf :disposition :hold)))
           {}))
 

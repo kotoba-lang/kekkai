@@ -67,6 +67,50 @@
       2. No-hijack         — the cidr is not already approved for a DIFFERENT
                             node (no silent route takeover).
       3. No-actuation.
+    :funnel/expose (kekkai funnel — public internet ingress to a fleet
+                    service; see kekkai.funnel. The one grant whose far side
+                    is the whole internet rather than an admitted key.)
+      1. Valid, AUTHORIZED target — the node whose service is exposed has a
+                            live, unexpired key and status authorized, in an
+                            active tailnet its owner belongs to (the same
+                            tenancy reading as admission).
+      2. Valid, AUTHORIZED edge — same for the node that runs the public
+                            listener.
+      3. Designated edge   — the edge carries `tag:funnel-edge` AND its owner
+                            is authorized for that tag by the edge's own
+                            tailnet policy. An unowned, self-claimed tag is
+                            the privilege escalation tag ownership exists to
+                            refuse; here it would be escalation to an
+                            internet-facing socket.
+      4. Organization boundary — edge and target are in the same tailnet
+                            (:cross-tailnet). A peering is an agreement
+                            between two organizations about each other; it
+                            is not consent to be forwarded the public
+                            internet by the other org's edge.
+      5. Host              — a canonical lowercase DNS name: no IP literal,
+                            no wildcard, no port, no trailing dot.
+      6. Host uniqueness   — no OTHER active funnel is bound to the host.
+                            Checked plane-wide, unlike route hijack: a public
+                            DNS name is globally unique by construction, so
+                            two tailnets binding one name is a conflict, not
+                            a coincidence. The denial never names the holder.
+      7. Port 1–65535, service named.
+      A LOCAL funnel (edge = target; kekkai.funnel/local?) is allowed —
+      the node serves its own service from its own public listener. It is
+      still :funnel/expose, still high-stakes, and the node must still be
+      authorized and carry the OWNED tag:funnel-edge, because it IS the
+      edge; the organization boundary passes trivially.
+      8. No retarget       — a proposal that carries a funnel must carry the
+                            request's funnel. The spec is the operator's; the
+                            advisor recommends, it does not re-address.
+      9. No-actuation      — effect must be :funnel-record.
+    :funnel/withdraw
+      1. The host has an active funnel to withdraw.
+      2. No-actuation      — effect must be :funnel-record.
+      Deliberately NO key check: withdrawing a funnel is exactly what an
+      operator does when a node's key is compromised or expired, and a rule
+      that refused to narrow exposure until the key was healthy again would
+      hold the door open for the duration of the incident.
     :treasury/release (ADR-2607110300 Phase 3 -- widens this governor's remit
                        from network reachability to value: same deny-by-
                        default philosophy as acl.cljc's edge-allowed?, now
@@ -132,12 +176,14 @@
                             reputation itself.
   SOFT:
     4. Confidence floor → escalate.
-    5. Node admission, exit-route approval, PEERING APPROVAL, treasury
-       release, witness disputes, AND availability slashing are all
-       high-stakes → ALWAYS human. Disputes go further than the others:
+    5. Node admission, exit-route approval, PEERING APPROVAL, FUNNEL
+       EXPOSURE, treasury release, witness disputes, AND availability
+       slashing are all high-stakes → ALWAYS human. (Funnel WITHDRAWAL is
+       not: it only ever narrows reachability.) Disputes go further than the others:
        confidence is irrelevant, there is no path to :ok? at all for that op."
   (:require [kotoba.lang.text :as str]
             [kekkai.acl :as acl]
+            [kekkai.funnel :as funnel]
             [kekkai.store :as store]))
 
 (def confidence-floor 0.6)
@@ -364,6 +410,97 @@
           :detail (str (:cidr route) " は同一 tailnet(" tn ") 内で既に別ノードに承認済み: "
                        (mapv :node conflict))}]))))
 
+;; ───────────────────────── funnel (public ingress) ─────────────────────────
+
+(defn- funnel-actuation-violations
+  "Same no-actuation philosophy as actuation-violations, scoped to funnels: an
+  approved proposal resolves to a :funnel-record for the netmap projector to
+  publish, never a listener this governor opens or a DNS record it writes."
+  [proposal]
+  (when (not= :funnel-record (:effect proposal))
+    [{:rule :no-actuation
+      :detail (str "actor は funnel の記録のみを行う(listener も DNS も作動させない)。effect="
+                   (:effect proposal))}]))
+
+(defn- funnel-node-violations
+  "Key validity + admission for one end of a funnel, with the rule names
+  prefixed by which end failed. `key-violations` alone is not enough: it does
+  not require status authorized, and a pending node is exactly one a human has
+  not yet let into the tailnet — it cannot be let in from the internet first."
+  [nd now label end]
+  (let [kv (key-violations nd now label)]
+    (cond
+      (seq kv)
+      (mapv #(update % :rule (fn [r] (keyword (str "funnel-" (name end) "-" (name r))))) kv)
+      (not= "authorized" (:status nd))
+      [{:rule (keyword (str "funnel-" (name end) "-unauthorized"))
+        :detail (str "funnel の " (name end) " ノードが未認可: " label " (" (:status nd) ")")}])))
+
+(defn- funnel-edge-tag-violations
+  "The edge must be DESIGNATED: carry `funnel/edge-tag` and have it owned.
+
+  Ownership is read from the EDGE's own tailnet policy, never a global one —
+  the same reason tag-violations reads the subject's tailnet: another
+  organization must not decide who may hold an internet-facing socket here."
+  [st edge]
+  (when edge
+    (let [policy (store/policy-of st (acl/tailnet-of edge))]
+      (cond
+        (not (some #{funnel/edge-tag} (:tags edge)))
+        [{:rule :funnel-edge-not-designated
+          :detail (str "edge ノード " (:id edge) " は " funnel/edge-tag " を持たない")}]
+        (not (acl/tag-owned? policy (:user edge) funnel/edge-tag))
+        [{:rule :funnel-edge-tag-not-owned
+          :detail (str "edge ノード " (:id edge) " の " funnel/edge-tag
+                       " は所有者 " (:user edge) " に認可されていない(自己主張)")}]))))
+
+(defn- funnel-violations
+  "Every hard invariant of `:funnel/expose` except the proposal's effect. See
+  the namespace docstring for the numbered list; the order here is the order
+  an operator should fix them in."
+  [st request proposal now]
+  (let [{:keys [host edge node service port] :as fs} (funnel/spec request)
+        target (store/node st node)
+        edge-n (store/node st edge)
+        bound  (store/active-funnel-for-host st host)
+        hp     (funnel/host-problem host)]
+    (cond-> []
+      true (into (funnel-node-violations target now node :target))
+      true (into (when target (tenancy-violations st target)))
+      ;; a local funnel's edge is its target: one node, checked once above
+      (not (funnel/local? fs)) (into (funnel-node-violations edge-n now edge :edge))
+      true (into (funnel-edge-tag-violations st edge-n))
+
+      (and target edge-n (not (acl/same-tailnet? target edge-n)))
+      (conj {:rule :cross-tailnet
+             :detail (str "funnel の edge と target が別組織(tailnet): "
+                          (acl/tailnet-of edge-n) " → " (acl/tailnet-of target))})
+
+      hp
+      (conj {:rule :funnel-host-invalid
+             :detail (str "公開ホスト名が正規の小文字 DNS 名ではない(" (name hp) "): " (pr-str host))})
+
+      ;; identical re-exposure is the same funnel, not another one
+      (and bound (not= fs (funnel/spec bound)))
+      (conj {:rule :funnel-host-bound
+             :detail (str host " は既に別の funnel に束縛済み")})
+
+      (not (funnel/valid-port? port))
+      (conj {:rule :funnel-port-invalid
+             :detail (str "port は 1–65535 の整数: " (pr-str port))})
+
+      (str/blank? (str service))
+      (conj {:rule :funnel-service-missing :detail "service 名が無い"})
+
+      (and (contains? proposal :funnel) (not= fs (:funnel proposal)))
+      (conj {:rule :funnel-retarget
+             :detail (str "提案の funnel が要求と異なる: " (pr-str (:funnel proposal)))}))))
+
+(defn- funnel-withdraw-violations [st request]
+  (when-not (store/active-funnel-for-host st (:host request))
+    [{:rule :no-funnel
+      :detail (str "active な funnel が無い: " (pr-str (:host request)))}]))
+
 ;; ───────────────────────── peering (cross-org) ─────────────────────────
 
 (defn- peering-actuation-violations
@@ -454,6 +591,13 @@
                (into [] (concat (key-violations subj now (:node request))
                                 (hijack-violations st (:node request) route)
                                 (actuation-violations proposal)))
+               :funnel/expose
+               (into [] (concat (funnel-violations st request proposal now)
+                                (funnel-actuation-violations proposal)))
+               ;; no key check — see the namespace docstring.
+               :funnel/withdraw
+               (into [] (concat (funnel-withdraw-violations st request)
+                                (funnel-actuation-violations proposal)))
                :treasury/release
                (into [] (concat (key-violations subj now (:node request))
                                 (witness-verdict-violations proposal)
@@ -479,6 +623,9 @@
                     ;; opening a path between two organizations is at least as
                     ;; consequential as admitting one machine — always human.
                     (= :peering/approve (:op request))
+                    ;; the whole internet on one side of the edge — the same
+                    ;; class as an exit node, always a human call.
+                    (= :funnel/expose (:op request))
                     (and (= :route/approve (:op request)) (= "exit" (:kind route))))
         hard?   (boolean (seq hard))]
     {:ok?          (and (not hard?) (not low?) (not stakes?))
@@ -489,12 +636,16 @@
      :high-stakes? stakes?}))
 
 (defn hold-fact [request verdict]
-  {:t (case (:op request)
-        :treasury/release :treasury-hold
-        :witness/dispute :witness-dispute-hold
-        :availability/slash :availability-slash-hold
-        :peering/approve :peering-hold
-        :tailnet-hold)
-   :op (:op request) :node (:node request)
-   :disposition :hold :basis (mapv :rule (:violations verdict))
-   :violations (:violations verdict) :confidence (:confidence verdict)})
+  (cond-> {:t (case (:op request)
+                :treasury/release :treasury-hold
+                :witness/dispute :witness-dispute-hold
+                :availability/slash :availability-slash-hold
+                :peering/approve :peering-hold
+                (:funnel/expose :funnel/withdraw) :funnel-hold
+                :tailnet-hold)
+           :op (:op request) :node (:node request)
+           :disposition :hold :basis (mapv :rule (:violations verdict))
+           :violations (:violations verdict) :confidence (:confidence verdict)}
+    ;; the public name is a funnel's identity in the genealogy — and the only
+    ;; thing about it that is recorded: never anything about traffic (G4).
+    (:host request) (assoc :host (:host request))))

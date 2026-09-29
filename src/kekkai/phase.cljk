@@ -24,7 +24,25 @@
 (def record-ops #{:node/register :node/heartbeat :user/register
                   :tailnet/register :peering/propose
                   :acl/publish :route/advertise})
-(def assess-ops #{:node/admit :access/assess :route/approve})
+(def assess-ops
+  "Network decisions that climb the rollout ladder.
+
+  `:funnel/expose` is here, NOT in an always-on set: a shadow (phase 0)
+  deployment must not be able to open internet ingress to a fleet service,
+  and even once enabled it never auto-commits (always high-stakes, see
+  governor.cljc) — it is gated like exit-node approval, the other place the
+  tailnet meets the public network."
+  #{:node/admit :access/assess :route/approve :funnel/expose})
+
+(def narrowing-ops
+  "Ops that only ever REDUCE reachability — `:funnel/withdraw`.
+
+  Active at every phase, including 0: an observe-only deployment that could
+  record an exposure but not take it back would be a ratchet. Auto-commits
+  (when clean and confident) from phase 2, like the other network decisions;
+  below that a human confirms, which is the phase ladder's meaning, not a
+  special case."
+  #{:funnel/withdraw})
 
 (def tenancy-ops
   "Cross-organization ops (ADR-2608040100): approving a peering opens a path
@@ -51,13 +69,13 @@
 ;; StateGraph, until dispute-resolution semantics are actually designed.
 (def value-ops #{:treasury/release})
 
-(def ^:private always-on (into value-ops tenancy-ops))
+(def ^:private always-on (into (into value-ops tenancy-ops) narrowing-ops))
 
 (def phases
   {0 {:label "observe-only" :assess always-on                   :auto #{}}
    1 {:label "assisted"     :assess (into assess-ops always-on) :auto #{}}
-   2 {:label "assisted-net" :assess (into assess-ops always-on) :auto #{:access/assess :route/approve}}
-   3 {:label "supervised"   :assess (into assess-ops always-on) :auto #{:access/assess :route/approve}}})
+   2 {:label "assisted-net" :assess (into assess-ops always-on) :auto #{:access/assess :route/approve :funnel/withdraw}}
+   3 {:label "supervised"   :assess (into assess-ops always-on) :auto #{:access/assess :route/approve :funnel/withdraw}}})
 
 (def default-phase
   "The phase used when `context` carries no :phase at all

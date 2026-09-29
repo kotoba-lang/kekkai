@@ -47,7 +47,11 @@
 
 (defn- sha256-hex ^String [^bytes bs]
   (->> (.digest (MessageDigest/getInstance "SHA-256") bs)
-       (map #(format "%02x" %))
+       ;; masked to 0..255 first: the digest is a signed byte array, and
+       ;; `%02x` of a negative byte is "ff" on the JVM (Formatter special-
+       ;; cases Byte) but the sign-extended "ffffffffffffff.." on the kbb
+       ;; engine — a digest the node side can never match.
+       (map #(format "%02x" (bit-and % 0xff)))
        (str/join)))
 
 (defn encode-payload
