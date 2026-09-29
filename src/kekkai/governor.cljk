@@ -75,7 +75,7 @@
       1. Valid node key   — same identity check as every other op; the
                             requesting actor must be a live, non-revoked,
                             non-expired node (an actor has its own did:key,
-                            per the CLAUDE.md Actor pattern).
+                            per the AGENTS.md Actor pattern).
       2. Witness quorum    — deny-by-default for value: an absent or
                             non-:witnessed witness-quorum verdict
                             (kotoba.lang.witness-quorum's :kind, injected via
