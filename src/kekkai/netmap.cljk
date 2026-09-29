@@ -47,7 +47,10 @@
   netmaps of exactly two nodes — its `:funnel/edge`, which opens the public
   listener, and its `:funnel/node`, which accepts the forwarded connections —
   plus a `:funnel` capability edge `edge → node` scoped to the one port, in
-  both. Every other node's netmap is untouched, byte for byte: a funnel is not
+  both. A LOCAL funnel (edge = node, `kekkai.funnel/local?`) is published
+  only in that node's netmap and adds no edge and no peer: it is served from
+  the node's own listener, so nothing crosses the overlay and nobody is
+  granted anything. Every other node's netmap is untouched, byte for byte: a funnel is not
   a fact the rest of the tailnet needs, and publishing it tailnet-wide would
   hand every node a map of which of its peers face the internet."
   (:require [kotoba.lang.text :as str]
@@ -166,7 +169,7 @@
     not checked here: the projector has no clock (`version` is the caller's
     for the same reason), so the edge must still apply
     `kekkai.node.netmap/authorized?` to the target peer before forwarding;
-  - the edge is not the target.
+  - a LOCAL funnel (edge = target) is kept: it names self twice.
 
   Sorted by host, ties broken by the rest of the spec, so the signed bytes
   never depend on the order the store returned records in."
@@ -178,7 +181,7 @@
     (->> funnels
          (filter #(= "active" (:status %)))
          (filter #(or (= (:id self) (:edge %)) (= (:id self) (:node %))))
-         (filter #(and (not= (:edge %) (:node %)) (ok? (:edge %)) (ok? (:node %))))
+         (filter #(and (ok? (:edge %)) (ok? (:node %))))
          (sort-by (juxt :host :edge :node :service :port))
          vec)))
 
@@ -186,9 +189,11 @@
   "The counterpart of each funnel `self` is an endpoint of. A funnel's edge and
   target must be able to open a session with each other even when no ACL grant
   joins them — the funnel IS the grant — so each is published as the other's
-  peer."
+  peer. A local funnel has no counterpart and contributes none."
   [self fs]
-  (into #{} (map #(if (= (:id self) (:edge %)) (:node %) (:edge %))) fs))
+  (into #{} (comp (remove funnel/local?)
+                  (map #(if (= (:id self) (:edge %)) (:node %) (:edge %))))
+        fs))
 
 (defn- candidate-decisions
   "For one candidate: `{:node … :out decision :in decision}`."
@@ -293,7 +298,8 @@
                                                     (conj (edge-entry self-id (:id node) out))
                                                     (:allowed? in)
                                                     (conj (edge-entry (:id node) self-id in))))))
-                                   (distinct (map funnel-edge-entry fs)))
+                                   ;; remote funnels only: a local one crosses no overlay
+                                   (distinct (map funnel-edge-entry (remove funnel/local? fs))))
                                   (sort-by (juxt :edge/from :edge/to))
                                   vec)
                :netmap/relays (mapv relay->wire relays)}

@@ -94,7 +94,12 @@
                             DNS name is globally unique by construction, so
                             two tailnets binding one name is a conflict, not
                             a coincidence. The denial never names the holder.
-      7. Port 1–65535, service named, edge ≠ target.
+      7. Port 1–65535, service named.
+      A LOCAL funnel (edge = target; kekkai.funnel/local?) is allowed —
+      the node serves its own service from its own public listener. It is
+      still :funnel/expose, still high-stakes, and the node must still be
+      authorized and carry the OWNED tag:funnel-edge, because it IS the
+      edge; the organization boundary passes trivially.
       8. No retarget       — a proposal that carries a funnel must carry the
                             request's funnel. The spec is the operator's; the
                             advisor recommends, it does not re-address.
@@ -462,17 +467,14 @@
     (cond-> []
       true (into (funnel-node-violations target now node :target))
       true (into (when target (tenancy-violations st target)))
-      true (into (funnel-node-violations edge-n now edge :edge))
+      ;; a local funnel's edge is its target: one node, checked once above
+      (not (funnel/local? fs)) (into (funnel-node-violations edge-n now edge :edge))
       true (into (funnel-edge-tag-violations st edge-n))
 
       (and target edge-n (not (acl/same-tailnet? target edge-n)))
       (conj {:rule :cross-tailnet
              :detail (str "funnel の edge と target が別組織(tailnet): "
                           (acl/tailnet-of edge-n) " → " (acl/tailnet-of target))})
-
-      (and (some? edge) (= edge node))
-      (conj {:rule :funnel-edge-is-target
-             :detail "edge と target が同一ノード(公開 listener は別の designated edge が持つ)"})
 
       hp
       (conj {:rule :funnel-host-invalid

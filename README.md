@@ -131,7 +131,19 @@ TailnetGovernor の HARD 不変条件（人間でも越えられない hold）:
 - host は正規の小文字 DNS 名（IP リテラル・wildcard・port・末尾ドット・大文字は拒否）
 - host が**別の** active funnel に束縛済みでない（公開 DNS 名は global に一意なので、
   route hijack と違い plane 全体で判定。拒否理由に保持者は出さない）
-- port 1–65535、service 名あり、edge ≠ target、advisor が funnel を書き換えていない、effect は `:funnel-record`
+- port 1–65535、service 名あり、advisor が funnel を書き換えていない、effect は `:funnel-record`
+
+**local funnel と remote funnel**（owner 決定 2026-09-29「エッジ自身のサービスは直接配信にして」）:
+
+| | remote funnel（edge ≠ node） | local funnel（edge = node） |
+|---|---|---|
+| 配信 | edge の公開 listener → overlay → NAT 内 target | ノード自身の公開 listener から直接配信、overlay を通らない |
+| netmap | edge と target の両方に `:netmap/funnels` + `:funnel` edge + 相互 peer | そのノードの netmap にだけ `:netmap/funnels`（edge = node = self）。**edge も peer も足さない** — 誰にも到達性を与えない |
+| governor | 上記すべて | 同じ（常に人間承認、`tag:funnel-edge` の所有も必要 — そのノードが edge だから）。組織境界は自明に満たす |
+
+`gad` の配備がちょうど両方: `gad` は IPv6 で公開到達可能なので自分の `block-node` を
+local funnel として直接配信し、同時に NAT 内の fleet ノードに対する remote funnel の edge
+になる。
 
 承認は提案時だけでなく**人間の sign-off 時にも再検閲**する（同じ host への 2 つの要求が
 両方 clean で escalate され、2 つ目の承認が公開名を黙って付け替える経路を塞ぐ）。
@@ -210,7 +222,7 @@ ledger → swaps to DatomicStore with identical results.
 | `src/kekkai/kotoba.cljk` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
 | `src/kekkai/sim.cljk` | demo driver |
 | `src/kekkai/query.cljk` | actor 不要の読み取り — `authorized?`（在籍）と `reachable?`（**組織境界込みの**到達可否）は別の問い |
-| `test/kekkai/*_test.cljk` | zero-trust contract · **組織境界**（`tenant_test`）· **funnel**（`funnel_test`）· store parity (Mem≡Datomic) · CACAO — kbb で **143 tests / 516 assertions**（`desired_state_test` は JVM 専用: `ProcessBuilder`/`java.nio` を使うため kbb engine では読み込めない） |
+| `test/kekkai/*_test.cljk` | zero-trust contract · **組織境界**（`tenant_test`）· **funnel**（`funnel_test`）· store parity (Mem≡Datomic) · CACAO — kbb で **147 tests / 536 assertions**（`desired_state_test` は JVM 専用: `ProcessBuilder`/`java.nio` を使うため kbb engine では読み込めない） |
 
 ## Tailscale → kekkai mapping
 

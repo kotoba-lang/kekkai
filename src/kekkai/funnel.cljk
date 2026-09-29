@@ -99,5 +99,16 @@
     (not (re-matches host-re host)) :invalid-name
     (re-matches #"[0-9]+" (re-find #"[^.]+$" host)) :ip-literal))
 
+(defn local?
+  "A LOCAL funnel: the edge IS the target (`:edge` = `:node`). The node is
+  itself publicly reachable (e.g. `gad` over IPv6) and serves its own service
+  straight from its public listener — nothing crosses the overlay, so a local
+  funnel grants no node-to-node reachability at all: no `:funnel` edge, no
+  peer. A REMOTE funnel (edge ≠ node) forwards over the overlay to a NAT'd
+  target and carries both. The same node can be the local funnel for its own
+  service and the edge of remote funnels for others."
+  [{:keys [edge node]}]
+  (and (some? edge) (= edge node)))
+
 (defn valid-port? [port]
   (and (int? port) (<= 1 port 65535)))

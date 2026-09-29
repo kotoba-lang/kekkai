@@ -168,11 +168,44 @@
     (is (not (contains? (rules (check (fresh) (assoc expose :port ok)))
                         :funnel-port-invalid)))))
 
-(deftest the-edge-is-not-the-target-and-the-service-is-named
-  (is (contains? (rules (check (fresh) (assoc expose :edge "gad")))
-                 :funnel-edge-is-target))
+(deftest the-service-is-named
   (is (contains? (rules (check (fresh) (assoc expose :service "")))
                  :funnel-service-missing)))
+
+;; ── local funnel: the edge serves its own service (owner decision 2026-09-29)
+
+(def local-expose
+  "edge-1 serving its own service straight from its public listener."
+  (assoc expose :node "edge-1" :edge "edge-1" :host "edge.example.net"))
+
+(deftest a-local-funnel-is-allowed-and-still-high-stakes
+  (let [v (check (fresh) local-expose)]
+    (is (not (:hard? v)) (pr-str (:violations v)))
+    (is (:high-stakes? v))
+    (is (not (:ok? v)) "always a human, like a remote funnel")))
+
+(deftest a-local-funnel-still-needs-the-owned-edge-tag
+  (testing "gad carries no tag:funnel-edge, so it cannot serve itself publicly"
+    (let [v (check (fresh) (assoc local-expose :node "gad" :edge "gad"))]
+      (is (:hard? v))
+      (is (contains? (rules v) :funnel-edge-not-designated))))
+  (testing "a self-claimed edge tag holds for a local funnel too"
+    (is (contains? (rules (check (fresh) (assoc local-expose :node "edge-rogue"
+                                                :edge "edge-rogue")))
+                   :funnel-edge-tag-not-owned)))
+  (testing "and the other hard holds still apply"
+    (is (contains? (rules (check (fresh) (assoc local-expose :host "203.0.113.7")))
+                   :funnel-host-invalid))
+    (is (contains? (rules (check (fresh) (assoc local-expose :port 0)))
+                   :funnel-port-invalid))
+    (is (contains? (rules (check (fresh) (assoc local-expose :node "edge-old" :edge "edge-old")))
+                   :funnel-target-expired-key))))
+
+(deftest a-local-funnel-goes-through-the-actor-to-a-human
+  (let [st (fresh) actor (op/build st)]
+    (is (= :interrupted (:status (run actor "l" local-expose 3))))
+    (is (= :commit (get-in (approve actor "l") [:state :disposition])))
+    (is (= "edge-1" (:node (store/active-funnel-for-host st "edge.example.net"))))))
 
 (deftest the-advisor-cannot-retarget-or-actuate
   (let [st (fresh)
@@ -339,12 +372,33 @@
                    ["pending target" (assoc approved :node "n-pending")]
                    ["cross-tailnet edge" (assoc approved :edge "a-edge")]
                    ["unknown edge" (assoc approved :edge "ghost")]
-                   ["edge is target" (assoc approved :edge "gad")]]]
+                   ["local funnel of a node that is not authorized"
+                    (assoc approved :edge "n-pending" :node "n-pending")]]]
     (doseq [self ["gad" "edge-1" "n-pending" "a-edge"]]
       (testing (str why " / netmap of " self)
         (let [n (nm/publish (inputs [f]) self)]
           (is (not (contains? n :netmap/funnels)))
           (is (not-any? #(= [:funnel] (:edge/capabilities %)) (:netmap/edges n))))))))
+
+(def local-approved
+  (assoc approved :edge "edge-1" :node "edge-1" :host "edge.example.net"))
+
+(deftest a-local-funnel-publishes-one-entry-and-grants-nothing
+  (let [without (nm/publish (inputs []) "edge-1")
+        n (nm/publish (inputs [local-approved]) "edge-1")]
+    (is (= [{:funnel/host "edge.example.net" :funnel/edge "edge-1" :funnel/node "edge-1"
+             :funnel/service "block-node" :funnel/port 8080}]
+           (:netmap/funnels n)))
+    (is (= (:netmap/edges without) (:netmap/edges n)) "no :funnel edge — nothing crosses the overlay")
+    (is (= (:netmap/peers without) (:netmap/peers n)) "no peer added")
+    (is (= (dissoc n :netmap/funnels) without) "otherwise the same netmap"))
+  (testing "beside a remote funnel on the same edge: one edge entry, for the remote one only"
+    (let [n (nm/publish (inputs [local-approved approved]) "edge-1")]
+      (is (= ["blocks.example.net" "edge.example.net"] (mapv :funnel/host (:netmap/funnels n))))
+      (is (= [funnel-edge] (filterv #(= [:funnel] (:edge/capabilities %)) (:netmap/edges n))))))
+  (testing "every other node's netmap is unchanged, the target of nothing"
+    (doseq [self ["gad" "n-laptop" "n-server"]]
+      (is (= (nm/publish (inputs []) self) (nm/publish (inputs [local-approved]) self)) self))))
 
 (deftest excluded-does-not-report-a-funnel-counterpart
   (let [reasons (into {} (map (juxt :node :excluded))
@@ -367,7 +421,8 @@
       (is (= pinned (bytes-of (dissoc (demo-only (inputs [])) :funnels))))
       (is (= pinned (bytes-of (demo-only (inputs [])))))
       (is (= pinned (bytes-of (inputs []))))
-      (is (= pinned (bytes-of (inputs [approved (assoc approved :host "z.example.net")]))))
+      (is (= pinned (bytes-of (inputs [approved (assoc approved :host "z.example.net")
+                                       local-approved]))))
       (testing "and through the store, after a real exposure committed"
         (let [st (fresh) actor (op/build st)]
           (run actor "p" expose 3)
