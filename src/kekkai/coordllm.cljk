@@ -23,6 +23,7 @@
             [kotoba.lang.text :as str]
             [langchain.model :as model]
             [kekkai.acl :as acl]
+            [kekkai.funnel :as funnel]
             [kekkai.store :as store]))
 
 ;; ───────────────────────── deterministic mock ─────────────────────────
@@ -103,12 +104,50 @@
      :effect :peering-record
      :confidence (if pr 0.75 0.2)}))
 
+(defn- assess-funnel
+  "Summarize what exposing a funnel would open, for the human who must decide.
+
+  Exposition again, not judgment: the governor routes every exposure to a human
+  whatever this returns. The proposal echoes the request's funnel spec
+  verbatim (`kekkai.funnel/spec`) rather than composing its own — the governor
+  holds any proposal whose funnel differs from the request's, so an advisor
+  that 'helpfully' corrected a port would be held, not obeyed."
+  [st req]
+  (let [fs (funnel/spec req)
+        target (store/node st (:node fs))
+        edge (store/node st (:edge fs))
+        ok? (and target edge (= "authorized" (:status target))
+                 (= "authorized" (:status edge))
+                 (nil? (funnel/host-problem (:host fs))))]
+    {:recommendation (if ok? :expose :deny)
+     :funnel fs
+     :summary (str "funnel " (:host fs) " → " (:edge fs) " ⇒ " (:node fs) "/"
+                   (:service fs) ":" (:port fs))
+     :rationale (str "インターネット全体から " (:node fs) " の " (:service fs)
+                     " (port " (:port fs) ") へ到達可能になる。公開 listener は "
+                     (:edge fs) "。要求の中身は記録しない(到達性の付与のみ)。")
+     :cites [:node :policy :funnels]
+     :effect :funnel-record
+     :confidence (if ok? 0.8 0.3)}))
+
+(defn- assess-funnel-withdraw [st {:keys [host]}]
+  (let [f (store/active-funnel-for-host st host)]
+    {:recommendation (if f :withdraw :deny)
+     :host host
+     :summary (str "funnel " host " 撤回" (when-not f " (active な funnel 無し)"))
+     :rationale "撤回は到達性を狭めるだけ。"
+     :cites [:funnels]
+     :effect :funnel-record
+     :confidence (if f 0.9 0.2)}))
+
 (defn infer [st {:keys [op] :as req}]
   (case op
     :node/admit      (assess-admit st req)
     :access/assess   (assess-access st req)
     :route/approve   (assess-route st req)
     :peering/approve (assess-peering st req)
+    :funnel/expose   (assess-funnel st req)
+    :funnel/withdraw (assess-funnel-withdraw st req)
     {:recommendation :unknown :summary "未対応" :rationale (str op)
      :cites [] :effect :noop :confidence 0.0}))
 
@@ -125,6 +164,8 @@
        "返します。EDN だけを出力。\n"
        "キー: :recommendation(:admit|:deny|:reachable|:approve) :peers([{:peer :ports}]) "
        ":route :summary :rationale :cites :effect(:netmap 固定) :confidence(0..1)。\n"
+       "funnel 操作(:funnel/expose|:funnel/withdraw)では :effect は :funnel-record、"
+       ":funnel は要求の値をそのまま返す(改変した提案は governor が保留する)。\n"
        "重要: WireGuard データ面の作動は提案しない(coordinate→netmap)。"
        "deny-by-default: ACL grant のない到達は提案しない。"))
 
@@ -169,6 +210,8 @@
        (let [resp (model/-generate chat-model
                     [{:role :system :content system-prompt}
                      {:role :user :content (str "操作:" (:op req) " ノード:" (:node req)
+                                                (when (:host req)
+                                                  (str " funnel:" (pr-str (funnel/spec req))))
                                                 "\n事実:" (pr-str (facts-for st req)))}]
                     gen-opts)]
          (parse-proposal (:content resp)))))))

@@ -26,6 +26,17 @@
     route    — a subnet/exit route a node advertises (cidr, kind, approved?)
     heartbeat— digital-twin liveness events (last-seen epoch s, endpoint)
     netmap   — the committed access assessment for a node (reachable peers)
+    funnel   — an APPROVED public-ingress binding (kekkai funnel, the
+               Tailscale-Funnel equivalent): a public DNS host, the edge node
+               that runs the internet-facing listener, and the target
+               node/service/port it forwards to over the overlay. Keyed by
+               host, because a public DNS name is globally unique in a way a
+               tag or an RFC1918 prefix is not. Written only by a committed
+               `:funnel/expose` (always human-approved) and narrowed by
+               `:funnel/withdraw`; status \"active\" | \"withdrawn\". The
+               record authorizes REACHABILITY from the internet — it has no
+               field for, and the control plane never receives, a request
+               that crossed it.
 
   Tenancy is a property of the *plane*, not of a deployment: one kekkai
   control plane serves many organizations, and `plane` projects the pure
@@ -55,6 +66,7 @@
   (all-policies [s]        "{tailnet-id policy} for every tailnet that published one")
   (policy [s]              "the default tailnet's ACL policy (single-tenant shorthand)")
   (all-peerings [s]        "every cross-tailnet peering record")
+  (all-funnels [s]         "every funnel record (active and withdrawn), sorted by :host")
   (heartbeats-of [s id]    "liveness events for a node, oldest→newest")
   (routes-of [s id]        "routes advertised by a node")
   (all-routes [s]          "every advertised route across every tailnet")
@@ -91,6 +103,20 @@
   {:policies (into {} (all-policies s))
    :peerings (vec (all-peerings s))})
 
+(defn funnel-active?
+  "Is this funnel record currently an approved public binding?
+
+  Exact match on \"active\", fail-closed: a record with no status, or any
+  status nobody anticipated, is NOT public. For a grant that opens a service
+  to the entire internet, the unknown case has to be the closed one."
+  [funnel]
+  (= "active" (:status funnel)))
+
+(defn active-funnel-for-host
+  "The active funnel bound to public `host`, or nil."
+  [s host]
+  (first (filter #(and (funnel-active? %) (= host (:host %))) (all-funnels s))))
+
 (defn netmap-inputs
   "The pure snapshot `kekkai.netmap/publish` projects into a wire netmap.
 
@@ -109,6 +135,9 @@
      :plane (plane s)
      :heartbeats (into {} (map (juxt :id #(vec (heartbeats-of s (:id %))))) nodes)
      :relays (vec relays)
+     ;; ACTIVE funnels only. A withdrawn record stays in the store as the
+     ;; genealogy of what was once public; it must not reach a netmap.
+     :funnels (filterv funnel-active? (all-funnels s))
      :version version}))
 
 ;; ───────────────────────── demo data ─────────────────────────
@@ -235,6 +264,7 @@
         (assoc acl/default-tailnet (:policy @a)))))
   (policy [s] (policy-of s acl/default-tailnet))
   (all-peerings [_] (sort-by :id (vals (:peerings @a))))
+  (all-funnels [_] (sort-by :host (vals (:funnels @a))))
   (heartbeats-of [_ id] (get-in @a [:heartbeats id] []))
   (routes-of [_ id] (filterv #(= id (:node %)) (vals (:routes @a))))
   (all-routes [_] (sort-by :id (vals (:routes @a))))
@@ -263,6 +293,12 @@
       ;; approval landed first.
       :peering    (swap! a update-in [:peerings id] #(assoc (merge % value) :id id))
       :route      (swap! a assoc-in [:routes id] value)
+      ;; A funnel is REPLACED, like a policy: an exposure is a whole grant, and
+      ;; merging a re-exposure over a withdrawn record would carry the old
+      ;; record's fields (a previous edge, a previous port) into the new one.
+      ;; `:host` is stamped from the id for the same reason `:id` is on a
+      ;; peering — lookups match on the value, not the key.
+      :funnel     (swap! a assoc-in [:funnels id] (assoc value :host id))
       :heartbeat  (swap! a update-in [:heartbeats id] (fnil conj []) value)
       :assessment (swap! a assoc-in [:assessments id] value)
       nil)
@@ -271,7 +307,8 @@
   (seed! [s data]
     (swap! a (fn [cur]
                (cond-> (merge cur (select-keys data [:tailnets :users :nodes :policies
-                                                     :peerings :routes :heartbeats]))
+                                                     :peerings :routes :heartbeats
+                                                     :funnels]))
                  ;; single-tenant shorthand: a bare :policy seeds the default
                  ;; tailnet, so pre-tenant seed maps still load unchanged.
                  (:policy data)
@@ -289,6 +326,8 @@
    :tailnet/id    {:db/unique :db.unique/identity}
    :peering/id    {:db/unique :db.unique/identity}
    :route/id      {:db/unique :db.unique/identity}
+   ;; keyed by the public host — see the `funnel` entity above.
+   :funnel/id     {:db/unique :db.unique/identity}
    ;; :policy/id is now the TAILNET id, not the literal "the" — one ACL
    ;; document per organization. `policy-key` maps the historical "the" onto
    ;; the default tailnet so an existing store keeps resolving.
@@ -332,6 +371,9 @@
   (all-peerings [this]
     (->> (q* this '[:find [?v ...] :where [?p :peering/id _] [?p :peering/edn ?v]])
          (mapv dec*) (sort-by :id)))
+  (all-funnels [this]
+    (->> (q* this '[:find [?v ...] :where [?f :funnel/id _] [?f :funnel/edn ?v]])
+         (mapv dec*) (sort-by :host)))
   (heartbeats-of [this id]
     (->> (q* this '[:find [?v ...] :in $ ?nid :where
                     [?r :hb/node ?nid] [?r :hb/edn ?v]] id)
@@ -369,6 +411,8 @@
                                                            value)
                                                     :id id))}])
       :route      (tx* s [{:route/id id :route/edn (enc value)}])
+      ;; replaced, not merged (see MemStore).
+      :funnel     (tx* s [{:funnel/id id :funnel/edn (enc (assoc value :host id))}])
       :heartbeat  (tx* s [{:hb/node id :hb/edn (enc value)}])
       :assessment (tx* s [{:assessment/id id :assessment/edn (enc value)}])
       nil)
@@ -384,6 +428,7 @@
     (when-let [p (:policy data)]   (record-datom! s {:kind :policy :id acl/default-tailnet :value p}))
     (doseq [[id p] (:peerings data)] (record-datom! s {:kind :peering :id id :value p}))
     (doseq [[id r] (:routes data)] (record-datom! s {:kind :route :id id :value r}))
+    (doseq [[id f] (:funnels data)] (record-datom! s {:kind :funnel :id id :value f}))
     (doseq [[id hbs] (:heartbeats data) hb hbs]
       (record-datom! s {:kind :heartbeat :id id :value hb}))
     s))
