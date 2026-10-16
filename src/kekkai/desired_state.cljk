@@ -206,7 +206,11 @@
                    text))
     (atomic-spit! (io/file root relative) text)))
 
-(defn- atomic-spit! [file text]
+(defn atomic-spit!
+  "Atomically replace `file` with UTF-8 text using a same-directory temporary.
+  Public so consumers can materialize a verified desired-state payload without
+  exposing partially written state to a polling node."
+  [file text]
   (let [parent (.getParentFile file)
         _ (.mkdirs parent)
         tmp (java.io.File/createTempFile ".kekkai-" ".tmp" parent)]

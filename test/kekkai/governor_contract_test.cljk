@@ -7,7 +7,10 @@
   (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [kekkai.store :as store]
+            [ed25519.core :as ed25519]
             [kekkai.coordllm :as coordllm]
+            [kekkai.heartbeat :as heartbeat]
+            [kekkai.netmap :as netmap]
             [kekkai.governor :as gov]
             [kekkai.operation :as op]))
 
@@ -20,10 +23,110 @@
 (deftest ingest-always-records
   (testing "observe path records a ground datom regardless of phase"
     (let [[s actor] (fresh)
-          res (run actor "i" {:op :node/heartbeat :node "n-server"
-                              :value {:last-seen store/demo-now :endpoint "198.51.100.9:41641"}} 0)]
+          seed (ed25519/unhex "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+          did (ed25519/did-key-from-seed seed)
+          now (heartbeat/now-seconds)
+          value (heartbeat/sign "n-server" 1 now ["198.51.100.9:41641"] seed)
+          _ (store/record-datom! s {:kind :node :id "n-server" :value {:did did}})
+          res (run actor "i" {:op :node/heartbeat :node "n-server" :value value} 0)]
       (is (= :record (get-in res [:state :disposition])))
-      (is (some #(= "198.51.100.9:41641" (:endpoint %)) (store/heartbeats-of s "n-server"))))))
+      (is (= did (:did (store/node s "n-server"))))
+      (is (= "198.51.100.9:41641"
+             (first (:endpoints (last (store/heartbeats-of s "n-server")))))))))
+
+(deftest heartbeat-ingest-rejects-replay-before-appending
+  (let [[s actor] (fresh)
+        seed (ed25519/unhex "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+        did (ed25519/did-key-from-seed seed)
+        now (heartbeat/now-seconds)
+        value (heartbeat/sign "n-server" 1 now ["198.51.100.9:41641"] seed)
+        _ (store/record-datom! s {:kind :node :id "n-server" :value {:did did}})
+        request {:op :node/heartbeat :node "n-server" :value value}
+        first-result (run actor "heartbeat-first" request 0)
+        replay-error (try
+                       (run actor "heartbeat-replay" request 0)
+                       nil
+                       (catch #?(:clj Exception :cljs :default) error error))]
+    (is (= :record (get-in first-result [:state :disposition])))
+    (is (some? replay-error))
+    (is (= :kekkai/invalid-node-heartbeat (-> replay-error ex-data :type)))
+    (is (= [:replayed-sequence] (-> replay-error ex-data :problems)))
+    (is (= 1 (count (store/heartbeats-of s "n-server"))))))
+
+(deftest node-register-cannot-swap-an-enrolled-heartbeat-signer
+  (let [[s actor] (fresh)
+        did (:did (store/node s "n-server"))
+        failure (try
+                  (run actor "replace-node-did"
+                       {:op :node/register :node "n-server"
+                        :value {:did "did:key:zAttacker"}} 0)
+                  nil
+                  (catch #?(:clj Exception :cljs :default) error error))]
+    (is (some? failure))
+    (is (= :kekkai/node-identity-reenrollment-required (-> failure ex-data :type)))
+    (is (= did (:did (store/node s "n-server"))))))
+
+(deftest node-register-cannot-change-enrolled-data-plane-or-acl-attributes
+  (doseq [[field replacement] [[:static-pub (apply str (repeat 64 "f"))]
+                               [:overlay-ip "100.64.99.99"]
+                               [:tags ["tag:exit"]]
+                               [:tailnet "attacker"]]]
+    (testing (str "existing node " field " stays immutable through node/register")
+      (let [[s actor] (fresh)
+            before (store/node s "n-server")
+            failure (try
+                      (run actor (str "mutate-" (name field))
+                           {:op :node/register :node "n-server"
+                            :value {field replacement}} 0)
+                      nil
+                      (catch #?(:clj Exception :cljs :default) error error))]
+        (is (some? failure))
+        (is (= :kekkai/node-update-requires-governed-path
+               (-> failure ex-data :type)))
+        (is (= before (store/node s "n-server")))))))
+
+(deftest node-register-cannot-self-authorize-a-new-node
+  (let [[s actor] (fresh)
+        failure (try
+                  (run actor "self-admit"
+                       {:op :node/register :node "n-untrusted"
+                        :value {:id "n-untrusted" :did "did:key:zUntrusted"
+                                :status "authorized"}} 0)
+                  nil
+                  (catch #?(:clj Exception :cljs :default) error error))]
+    (is (some? failure))
+    (is (= :kekkai/node-status-change-requires-admission (-> failure ex-data :type)))
+    (is (nil? (store/node s "n-untrusted")))))
+
+(deftest signed-heartbeat-candidates-flow-through-netmap-and-withdraw
+  (doseq [[store-name make-store]
+          [[:memory store/seed-db]
+           [:datomic store/datomic-seed-db]]]
+    (testing (str "signed candidates flow through " (name store-name) " and withdraw")
+      (let [s (make-store)
+            actor (op/build s)
+            seed (ed25519/unhex "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+            did (ed25519/did-key-from-seed seed)
+            now (heartbeat/now-seconds)
+            _ (store/record-datom! s {:kind :node :id "n-server" :value {:did did}})
+            first-value (heartbeat/sign "n-server" 1 now ["203.0.113.20:41641"] seed)
+            _ (run actor "candidate-publish" {:op :node/heartbeat :node "n-server"
+                                               :value first-value} 0)
+            first-netmap (netmap/publish
+                          (store/netmap-inputs s {:relays [] :version 43}) "n-laptop")
+            first-peer (first (filter #(= "n-server" (:node/id %))
+                                      (:netmap/peers first-netmap)))
+            second-value (heartbeat/sign "n-server" 2 (heartbeat/now-seconds) [] seed)
+            _ (run actor "candidate-withdraw" {:op :node/heartbeat :node "n-server"
+                                                :value second-value} 0)
+            second-netmap (netmap/publish
+                           (store/netmap-inputs s {:relays [] :version 44}) "n-laptop")
+            second-peer (first (filter #(= "n-server" (:node/id %))
+                                       (:netmap/peers second-netmap)))]
+        (is (= [{:kind :reflexive :host "203.0.113.20" :port 41641}]
+               (:node/endpoints first-peer)))
+        (is (not (contains? second-peer :node/endpoints)))
+        (is (= 2 (count (store/heartbeats-of s "n-server"))))))))
 
 (deftest clean-device-requires-machine-approval
   (testing "a clean device never auto-admits — it interrupts for a human admin"

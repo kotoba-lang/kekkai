@@ -173,6 +173,99 @@ kbb -M:dev:test    # the zero-trust contract + store parity + CACAO crypto
 kbb -M:lint        # clj-kondo (errors fail)
 ```
 
+### Signed heartbeat ingress
+
+`kekkai.heartbeat-http` accepts only signed `:node/heartbeat` writes for nodes
+already enrolled as `authorized`. The signer DID is bound to the node ID;
+replayed sequences, revoked nodes, stale timestamps, malformed candidate sets,
+and invalid signatures are rejected by the same actor path used by the store
+tests. The server refuses non-loopback binds. Remote nodes must reach it through
+a TLS-terminating reverse proxy; the service itself never accepts public HTTP.
+
+Prepare an operator-owned EDN snapshot with an enrolled `:nodes` map and the
+existing policy/tailnet data, then run:
+
+```bash
+cd /opt/kekkai
+CLJ_CONFIG=/var/lib/kekkai/clj-config kbb --backend sci --classpath src \
+  -m kekkai.heartbeat-http /etc/kekkai/control-plane.edn 127.0.0.1 17892
+```
+
+Each accepted heartbeat is atomically persisted to that file. The route is
+`POST /v1/nodes/{node-id}/heartbeat` with `Content-Type: application/edn` and
+the signed heartbeat map as EDN. The request body is capped at 16 KiB. Run the
+KBB Node reconciler beside the ingress to turn each new persisted snapshot into
+changed per-node signed netmaps. It publishes only for authorized nodes and
+publishes a narrowed map when a node is revoked. Heartbeats never change ACLs,
+admission, or routes.
+
+#### Tailscale を使わない初回 netmap 取得
+
+初回起動時に SSH mirror 自体へ接続できないノード向けに、登録済み DID で署名した
+read-only HTTPS bootstrap を提供する。API は loopback のみで待ち受け、既存の TLS
+reverse proxy から公開する。heartbeat の state snapshot と同じ authority / mirrors を
+使うため、返す netmap は authority が署名した envelope と CID / epoch を node 側でも
+再検証する。`authorized` node には現在の map、`revoked` node には絞り込まれた map を返す。
+
+```clojure
+;; /etc/kekkai/netmap-http.edn
+{:state-file "/etc/kekkai/control-plane.edn"
+ :roots ["/var/lib/kekkai/mirror-a" "ssh://naphtali/var/lib/kekkai/mirror-b"]
+ :authority-spki-b64 "<pinned-authority-SPKI-base64>"
+ :host "127.0.0.1"
+ :port 17893}
+```
+
+```bash
+CLJ_CONFIG=/var/lib/kekkai/clj-config kbb --backend sci --classpath src \
+  -m kekkai.netmap-http /etc/kekkai/netmap-http.edn
+```
+
+TLS proxy は `GET /v1/nodes/{node-id}/netmap` と
+`x-kekkai-issued-at` / `x-kekkai-signature` headers を loopback service に中継する。
+signature は `kekkai.netmap-read.v1`, node ID, Unix timestamp を node の登録済み
+Ed25519 DID seed で署名する。API は時刻幅と DID / node status を照合し、state を変更しない。
+node の watcher は `:api-url` を設定するとこの経路を使い、HTTPS origin 以外では送信しない
+（localhost の HTTP は開発用）。公開 HTTPS endpoint が用意されていれば、bootstrap relay や
+Tailscale に依存せず最初の signed netmap を取得できる。
+
+```clojure
+;; /etc/kekkai/netmap-reconciler.edn
+{:state-file "/etc/kekkai/control-plane.edn"
+ :identity-file "/etc/kekkai/authority.edn" ; generated once, mode 600
+ :roots ["/var/lib/kekkai/mirror-a" "ssh://naphtali/var/lib/kekkai/mirror-b"]
+ :min-copies 2
+ :poll-ms 1000
+ :relays [{:name "jp-tyo-1" :region "jp" :host "relay.example.net"
+           :port 41642 :key "<64-hex-character-public-key>"}]}
+```
+
+Run it as a long-lived service after the heartbeat snapshot exists:
+
+```bash
+CLJ_CONFIG=/var/lib/kekkai/clj-config kbb --backend sci --classpath src \
+  -m kekkai.netmap-reconciler \
+  /etc/kekkai/netmap-reconciler.edn --watch
+```
+
+The reconciler polls the atomically replaced snapshot, isolates mirror failures
+per node, and retries until every eligible map is published. Stable snapshots
+are idempotent: heartbeat timestamps alone do not advance netmap versions.
+Each node then runs the `kekkai-node` Node watcher for subject
+`tailnet/node-id`, pinned to the same authority SPKI, and points its resident
+agent at the watched file. At least one signed relay is required so a direct
+path failure has a configured fallback.
+
+Generate the authority identity once before configuring the reconciler. The
+command refuses to overwrite an existing identity, writes the private key with
+mode 0600, and prints only the public authority name and SPKI pin. Keep the
+identity file on the control-plane host; configure the printed SPKI value in
+the netmap HTTP service and pin that same value on every node.
+
+```bash
+./run-control-plane.sh authority-keygen /etc/kekkai/authority.edn
+```
+
 ### Cloudflare を使わない netmap 配布
 
 netmap は単一 URL へ push せず、署名済み desired state として複数の独立 root に
@@ -190,8 +283,27 @@ kbb -M -m kekkai.cli netmap-publish netmap.edn .kekkai/authority.edn \
 
 # node 側: mirror を pull し、authority/CID/signature/epoch を検証してから読む
 kbb -M -m kekkai.cli netmap-pull \
-  /mnt/mirror-a,/mnt/mirror-b tailnet/node-a "$KEKKAI_AUTHORITY_SPKI" 1
+  /mnt/mirror-a,/mnt/mirror-b tailnet/node-a "$KEKKAI_AUTHORITY_SPKI" 1 "" \
+  /run/kekkai/netmap.signed.edn
+
+# 常駐 node: verified mirror head を監視して同じ node-readable file を更新
+kbb -M -m kekkai.cli netmap-watch \
+  /mnt/mirror-a,/mnt/mirror-b tailnet/node-a "$KEKKAI_AUTHORITY_SPKI" \
+  /run/kekkai/netmap.signed.edn 5000
+
+# Murakumo fleet admission: one KBB process for all selected node IDs
+kbb -M -m kekkai.status-cli status-batch kekkai-tailnet.edn node-a node-b
+# => {"node-a" "authorized", "node-b" "pending"}
 ```
+
+`status-batch` is a read-only membership query. It does not publish a netmap or
+change admission, and a returned `"authorized"` status does not itself grant
+network traffic; the signed netmap and `kekkai-node` still enforce data-plane
+permissions. `netmap-publish` stores a node-verifiable Ed25519 envelope inside
+the CID-addressed desired-state record. `netmap-pull` and `netmap-watch` verify
+both signatures before atomically writing that envelope. Point the resident
+node's `:netmap-file` at the output path and pin the same
+`KEKKAI_AUTHORITY_SPKI`; its reload loop applies each higher signed version.
 
 mutable head は discovery hint にすぎず、内容の identity ではない。ある mirror が
 停止しても他方から取得でき、古い head への巻き戻しと同 epoch の上書きは発行側でも
@@ -219,10 +331,12 @@ ledger → swaps to DatomicStore with identical results.
 | `src/kekkai/cacao.cljk` | agent-side **CACAO self-mint** (JVM Ed25519 + did:key + CBOR; per-actor node key) |
 | `src/kekkai/desired_state.cljk` | authority 署名 + CIDv1 + epoch/previous CID + multi-mirror head + split-brain/rollback 検出 + node receipt |
 | `src/kekkai/netmap_distribution.cljk` | wire netmap を共通 desired-state 契約で publish/pull |
+| `src/kekkai/heartbeat_http.cljk` | loopback-only signed heartbeat API and atomic state snapshots |
+| `src/kekkai/netmap_http.cljk` | loopback-only, node-DID-authenticated read-only netmap bootstrap API |
 | `src/kekkai/kotoba.cljk` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
 | `src/kekkai/sim.cljk` | demo driver |
 | `src/kekkai/query.cljk` | actor 不要の読み取り — `authorized?`（在籍）と `reachable?`（**組織境界込みの**到達可否）は別の問い |
-| `test/kekkai/*_test.cljk` | zero-trust contract · **組織境界**（`tenant_test`）· **funnel**（`funnel_test`）· store parity (Mem≡Datomic) · CACAO — kbb で **147 tests / 536 assertions**（`desired_state_test` は JVM 専用: `ProcessBuilder`/`java.nio` を使うため kbb engine では読み込めない） |
+| `test/kekkai/*_test.cljk` | zero-trust contract · **組織境界**（`tenant_test`）· **funnel**（`funnel_test`）· store parity (Mem≡Datomic) · CACAO · signed heartbeat ingress · desired-state reconciliation and HTTPS bootstrap（`desired_state_test` は JVM 専用: `ProcessBuilder`/`java.nio` を使うため kbb engine では読み込めない） |
 
 ## Tailscale → kekkai mapping
 

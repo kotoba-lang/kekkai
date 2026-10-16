@@ -73,24 +73,103 @@
 (defn- ports->wire [ports]
   (mapv port->wire ports))
 
+(defn- ipv4-literal? [host]
+  (let [parts (str/split host #"\.")]
+    (and (= 4 (count parts))
+         (every? (fn [part]
+                   (and (re-matches #"\d{1,3}" part)
+                        (let [n (parse-long part)]
+                          (and n (<= 0 n 255)))))
+                 parts))))
+
+(defn- hostname? [host]
+  (let [host (if (.endsWith host ".") (subs host 0 (dec (count host))) host)
+        labels (str/split host #"\.")]
+    (and (<= 1 (count host) 253)
+         (every? (fn [label]
+                   (and (<= 1 (count label) 63)
+                        (re-matches #"(?i)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+                                    label)))
+                 labels))))
+
+(defn- ipv6-literal? [host]
+  (let [compression (.indexOf host "::")
+        compressed? (not (neg? compression))
+        second-compression (when compressed?
+                             (.indexOf host "::" (+ compression 2)))
+        left (if compressed? (subs host 0 compression) host)
+        right (if compressed? (subs host (+ compression 2)) "")
+        groups (concat (if (empty? left) [] (str/split left #":"))
+                       (if (empty? right) [] (str/split right #":")))]
+    (and (not (str/blank? host))
+         (or (not compressed?) (neg? second-compression))
+         (or (not compressed?) (not (str/includes? host ":::")))
+         (or (.startsWith host "::") (not (.startsWith host ":")))
+         (or (.endsWith host "::") (not (.endsWith host ":")))
+         (or (empty? left)
+             (and (not (.startsWith left ":"))
+                  (not (.endsWith left ":"))))
+         (or (empty? right)
+             (and (not (.startsWith right ":"))
+                  (not (.endsWith right ":"))))
+         (if compressed? (< (count groups) 8) (= 8 (count groups)))
+         (every? #(and (<= 1 (count %) 4)
+                       (re-matches #"(?i)[0-9a-f]+" %))
+                 groups))))
+
+(defn- valid-host? [host bracketed-ipv6?]
+  (if bracketed-ipv6?
+    (ipv6-literal? host)
+    (and (not (str/includes? host ":"))
+         (or (ipv4-literal? host) (hostname? host)))))
+
 (defn- parse-endpoint
-  "`\"203.0.113.7:41641\"` -> `{:kind :reflexive :host … :port …}`, or nil.
+  "`\"203.0.113.7:41641\"` or `\"[2001:db8::7]:41641\"` ->
+  `{:kind :reflexive :host … :port …}`, or nil.
 
   A heartbeat endpoint is what the node last observed about itself, so it is
   published as `:reflexive`: a hint for `kekkai.node.disco` to probe, never a
   fact. Anything unparseable yields nil rather than a partial candidate."
   [endpoint]
   (when (string? endpoint)
-    (let [idx (str/last-index-of endpoint ":")
-          host (when idx (subs endpoint 0 idx))
-          port (when idx (subs endpoint (inc idx)))]
-      (when (and (seq host) (re-matches #"\d{1,5}" (str port)))
-        {:kind :reflexive :host host :port (parse-long port)}))))
+    (let [endpoint (str/trim endpoint)
+          bracketed? (.startsWith endpoint "[")
+          close (when bracketed? (.indexOf endpoint "]"))
+          separator (if bracketed?
+                      (when (and close (pos? close)
+                                 (< close (dec (count endpoint)))
+                                 (= ":" (subs endpoint (inc close) (+ close 2))))
+                        (+ close 1))
+                      (let [idx (str/last-index-of endpoint ":")]
+                        (when (and idx (not (neg? idx))
+                                   (not (str/includes? (subs endpoint 0 idx) ":")))
+                          idx)))
+          host (when separator
+                 (if bracketed?
+                   (subs endpoint 1 close)
+                   (subs endpoint 0 separator)))
+          port-text (when separator (subs endpoint (inc separator)))
+          port (when (and port-text (re-matches #"\d{1,5}" port-text))
+                 (parse-long port-text))]
+      (when (and (seq host)
+                 (valid-host? host bracketed?)
+                 port (<= 1 port 65535))
+        {:kind :reflexive :host host :port port}))))
 
-(defn- endpoints-of [heartbeats node-id]
-  (into []
-        (comp (keep :endpoint) (keep parse-endpoint) (distinct))
-        (get heartbeats node-id)))
+(defn- endpoints-of
+  "Candidates from the node's most recent heartbeat. Store heartbeats are
+  ordered oldest-to-newest; older reflexive mappings are hints from an earlier
+  NAT state and must never survive a newer heartbeat that clears or replaces
+  them."
+  [heartbeats node-id]
+  (let [latest (last (get heartbeats node-id))
+        candidates (cond
+                     (contains? latest :endpoints) (:endpoints latest)
+                     (:endpoint latest) [(:endpoint latest)]
+                     :else [])]
+    (into []
+          (comp (keep parse-endpoint) (distinct))
+          candidates)))
 
 (defn- node->wire [node heartbeats]
   (cond-> {:node/id (:id node)
