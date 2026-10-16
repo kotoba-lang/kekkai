@@ -386,28 +386,78 @@
      :desired/copies copies :desired/results results
      :node-envelope node-envelope}))
 
-(defn- reconcile-node! [inputs node roots min-copies identity]
-  (let [subject (subject-for-node node)
-        current (current-publication roots subject identity)
-        version (if current (inc (:netmap/version (:netmap current))) 1)
-        projected (netmap/publish (assoc inputs :version version) (:id node))
-        unchanged? (and current
-                         (= (dissoc projected :netmap/version)
-                            (dissoc (:netmap current) :netmap/version)))]
-    (if unchanged?
-      {:node (:id node) :subject subject :status :unchanged
-       :netmap/version (:netmap/version (:netmap current))
-       :desired/epoch (:desired/epoch current) :desired/cid (:desired/cid current)}
-      (let [epoch (if current (inc (:desired/epoch current)) 1)
-            publication (publish-netmap! roots min-copies subject epoch
-                                         (:desired/cid current) projected identity)]
-        (-> publication
-            (dissoc :node-envelope :desired/results)
-            (assoc :node (:id node) :subject subject :status :published
-                   :netmap/version version))))))
+(defn- plan-node [inputs node roots identity]
+  (let [subject (subject-for-node node)]
+    (try
+      (let [current (current-publication roots subject identity)
+            current-version (get-in current [:netmap :netmap/version])
+            _ (when (and current (not (int? current-version)))
+                (throw (ex-info "current netmap has an invalid version"
+                                {:type :kekkai/invalid-current-netmap-version})))
+            projected (netmap/publish (assoc inputs :version 1) (:id node))]
+        {:node node :subject subject :current current :projected projected})
+      (catch :default error
+        {:node node :subject subject :error error}))))
+
+(defn- failed-plan [plan error-type reason]
+  {:node (:id (:node plan)) :subject (:subject plan) :status :failed
+   :error-type error-type :reason reason})
+
+(defn- reconcile-tailnet! [inputs nodes roots min-copies identity]
+  (let [plans (mapv #(plan-node inputs % roots identity) nodes)
+        failed (first (filter :error plans))]
+    (if failed
+      (mapv (fn [plan]
+              (if-let [error (:error plan)]
+                (failed-plan plan (:type (ex-data error))
+                             (or (ex-message error) "netmap preflight failed"))
+                (failed-plan plan :kekkai/netmap-generation-blocked
+                             "tailnet generation blocked by another node's netmap preflight failure")))
+            plans)
+      (let [currents (keep :current plans)
+            versions (mapv #(get-in % [:netmap :netmap/version]) currents)
+            aligned? (and (= (count plans) (count currents))
+                          (= 1 (count (set versions))))
+            content-changed? (some (fn [{:keys [current projected]}]
+                                     (or (nil? current)
+                                         (not= (dissoc projected :netmap/version)
+                                               (dissoc (:netmap current)
+                                                       :netmap/version))))
+                                   plans)
+            publish-generation? (or (not aligned?) content-changed?)
+            latest-version (reduce max 0 versions)
+            version (if publish-generation? (inc latest-version) latest-version)]
+        (mapv (fn [{:keys [node subject current projected]}]
+                (try
+                  (if-not publish-generation?
+                    {:node (:id node) :subject subject :status :unchanged
+                     :netmap/version version
+                     :desired/epoch (:desired/epoch current)
+                     :desired/cid (:desired/cid current)}
+                    (let [epoch (if current (inc (:desired/epoch current)) 1)
+                          publication (publish-netmap!
+                                       roots min-copies subject epoch
+                                       (:desired/cid current)
+                                       (assoc projected :netmap/version version)
+                                       identity)]
+                      (-> publication
+                          (dissoc :node-envelope :desired/results)
+                          (assoc :node (:id node) :subject subject :status :published
+                                 :netmap/version version))))
+                  (catch :default error
+                    (failed-plan {:node node :subject subject}
+                                 (:type (ex-data error))
+                                 (or (ex-message error)
+                                     "netmap publication failed")))))
+              plans)))))
 
 (defn reconcile!
   "Publish changed signed netmaps for authorized and revoked nodes.
+
+  `:netmap/version` is a tailnet generation because the node's Noise prologue
+  binds it. Any changed projection advances the generation and republishes all
+  eligible nodes in that tailnet at the same version; existing version skew is
+  repaired the same way. Desired-state epochs remain per node.
 
   Requires the operator's identity, persisted store snapshot, and one or more
   local/SSH mirror roots. A relay is required by default; deployments that have
@@ -434,19 +484,27 @@
       (throw (ex-info "mirror quorum must be between one and root count"
                       {:type :kekkai/invalid-mirror-quorum})))
     (let [inputs (store/netmap-inputs store {:relays relays :version 1})
-          outcomes (mapv (fn [node]
-                           (try
-                             (if (contains? #{"authorized" "revoked"} (:status node))
-                               (reconcile-node! inputs node roots min-copies identity)
-                               {:node (:id node) :status :skipped
-                                :reason :node-not-authorized})
-                             (catch :default error
-                               {:node (:id node) :subject (subject-for-node node)
-                                :status :failed
-                                :error-type (:type (ex-data error))
-                                :reason (or (ex-message error)
-                                            "netmap reconciliation failed")})))
-                         (store/all-nodes store))]
+          nodes (vec (store/all-nodes store))
+          eligible (filterv #(contains? #{"authorized" "revoked"} (:status %)) nodes)
+          grouped (sort-by key (group-by acl/tailnet-of eligible))
+          published-outcomes
+          (mapcat (fn [[_ tailnet-nodes]]
+                    (try
+                      (reconcile-tailnet! inputs tailnet-nodes roots min-copies identity)
+                      (catch :default error
+                        (mapv #(failed-plan {:node % :subject (subject-for-node %) }
+                                            (:type (ex-data error))
+                                            (or (ex-message error)
+                                                "netmap reconciliation failed"))
+                              tailnet-nodes))))
+                  grouped)
+          skipped-outcomes (mapv (fn [node]
+                                  {:node (:id node) :status :skipped
+                                   :reason :node-not-authorized})
+                                (remove #(contains? #{"authorized" "revoked"}
+                                                     (:status %))
+                                        nodes))
+          outcomes (into (vec published-outcomes) skipped-outcomes)]
       {:outcomes outcomes
        :published (count (filter #(= :published (:status %)) outcomes))
        :unchanged (count (filter #(= :unchanged (:status %)) outcomes))
