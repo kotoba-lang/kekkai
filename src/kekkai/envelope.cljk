@@ -91,6 +91,7 @@
             *print-level* nil]
     (pr-str envelope)))
 
+
 (defn authority-spki-b64
   "The value a node configures as `:netmap-authority-spki-b64`.
 

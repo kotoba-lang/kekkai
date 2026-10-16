@@ -23,6 +23,7 @@
             [kekkai.acl :as acl]
             [kekkai.coordllm :as coordllm]
             [kekkai.funnel :as funnel]
+            [kekkai.heartbeat :as heartbeat]
             [kekkai.governor :as gov]
             [kekkai.phase :as phase]
             [kekkai.store :as store]))
@@ -46,6 +47,70 @@
     ;; one still lands on the default tailnet rather than a new orphan key.
     :acl/publish      {:kind :policy    :id (store/policy-key tailnet) :value value}
     :route/advertise  {:kind :route     :id route   :value value}))
+
+(defn- node-registration-record [st request]
+  (let [node-id (:node request)
+        current (store/node st node-id)
+        old-did (:did current)
+        value (:value request)]
+    (when-not (map? value)
+      (throw (ex-info "node/register requires a map value"
+                      {:type :kekkai/invalid-node-registration
+                       :node node-id})))
+    (when (and old-did
+               (contains? value :did)
+               (not= old-did (:did value)))
+      (throw (ex-info "registered node identity cannot be replaced by node/register"
+                      {:type :kekkai/node-identity-reenrollment-required
+                       :node node-id})))
+    (when (and (contains? value :status)
+               (not= (:status current) (:status value))
+               (not (and (nil? current) (= "pending" (:status value)))))
+      (throw (ex-info "node/register cannot admit or change an existing node status"
+                      {:type :kekkai/node-status-change-requires-admission
+                       :node node-id :current (:status current)
+                       :requested (:status value)})))
+    (when (and current
+               (some (fn [[key requested]]
+                       (or (not (contains? current key))
+                           (not= requested (get current key))))
+                     value))
+      (throw (ex-info "node/register cannot change enrolled node attributes"
+                      {:type :kekkai/node-update-requires-governed-path
+                       :node node-id})))
+    {:kind :node :id node-id :value value}))
+
+(defn- ingest-record! [st request]
+  (let [write! (fn []
+                 (let [record
+                       (case (:op request)
+                         :node/heartbeat
+                         (let [node-id (:node request)
+                               node (store/node st node-id)
+                               last-sequence (reduce max 0
+                                                     (keep :heartbeat/sequence
+                                                           (store/heartbeats-of st node-id)))
+                               now (heartbeat/now-seconds)
+                               problems (heartbeat/validation-problems
+                                         node-id node (:value request) now last-sequence)]
+                           (when (seq problems)
+                             (throw (ex-info "node heartbeat rejected"
+                                             {:type :kekkai/invalid-node-heartbeat
+                                              :node node-id :problems problems})))
+                           {:kind :heartbeat :id node-id
+                            ;; Receipt time is authoritative; the node's clock
+                            ;; is used only for bounded freshness validation.
+                            :value (assoc (:value request) :last-seen now)})
+                         :node/register (node-registration-record st request)
+                         (request->record request))]
+                   (store/record-datom! st record)
+                   record))]
+    (if (#{:node/heartbeat :node/register} (:op request))
+      ;; Identity consistency, signature/replay validation and append form one
+      ;; critical section for actor runs sharing this store object.
+      #?(:clj (locking st (write!))
+         :cljs (write!))
+      (write!))))
 
 (defn- subject [{:keys [node user]}] (or node user))
 
@@ -163,10 +228,9 @@
       ;; ── ingest path: record a ground datom (observe), no LLM/governor ──
       (g/add-node :record
         (fn [{:keys [request]}]
-          (let [rec (request->record request)
+          (let [rec (ingest-record! store request)
                 f   {:t :recorded :op (:op request) :subject (subject request)
                      :disposition :record :basis (:kind rec)}]
-            (store/record-datom! store rec)
             (store/append-ledger! store f)
             {:disposition :record :audit [f]})))
 

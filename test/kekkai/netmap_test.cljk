@@ -122,6 +122,33 @@
             server (first (filter #(= "n-server" (:node/id %)) (:netmap/peers n)))]
         (is (not (contains? server :node/endpoints)))))))
 
+(deftest only-the-latest-heartbeat-candidate-set-is-published
+  (let [in (inputs {:heartbeats
+                    {"n-laptop" [{:last-seen 10 :endpoint "192.0.2.1:41000"}
+                                 {:last-seen 20
+                                  :endpoints ["203.0.113.8:41642"
+                                              "naphtali.example:41643"
+                                              "[2001:db8::7]:41644"
+                                              "198.51.100.7:0"
+                                              "198.51.100.8:65536"
+                                              "[:::]:41646"
+                                              "[1:::2]:41647"
+                                              "2001:db8::7:41645"]}]}})
+        netmap (nm/publish in "n-server")
+        laptop (first (filter #(= "n-laptop" (:node/id %)) (:netmap/peers netmap)))]
+    (is (= [{:kind :reflexive :host "203.0.113.8" :port 41642}
+            {:kind :reflexive :host "naphtali.example" :port 41643}
+            {:kind :reflexive :host "2001:db8::7" :port 41644}]
+           (:node/endpoints laptop)))))
+
+(deftest an-empty-latest-heartbeat-clears-old-candidates
+  (let [in (inputs {:heartbeats
+                    {"n-laptop" [{:last-seen 10 :endpoint "192.0.2.1:41000"}
+                                 {:last-seen 20 :endpoints []}]}})
+        netmap (nm/publish in "n-server")
+        laptop (first (filter #(= "n-laptop" (:node/id %)) (:netmap/peers netmap)))]
+    (is (not (contains? laptop :node/endpoints)))))
+
 (deftest a-node-without-data-plane-facts-fails-loudly
   (testing "missing :static-pub is named here, not as :peer-missing-key there"
     (let [nodes (mapv #(if (= "n-server" (:id %)) (dissoc % :static-pub) %)
